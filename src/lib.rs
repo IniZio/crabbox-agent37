@@ -13,6 +13,7 @@ pub mod key;
 pub mod lease;
 pub mod power;
 pub mod protocol;
+mod tools;
 pub mod tunnel;
 
 use std::io::Write;

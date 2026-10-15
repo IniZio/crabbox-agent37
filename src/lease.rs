@@ -296,6 +296,10 @@ pub fn acquire(
         let _ = writeln!(diag, "acquire: reading host key");
         fetch_host_key(api, &id, deadline)
     });
+    let ready = ready.and_then(|key| {
+        let _ = writeln!(diag, "acquire: checking required tools");
+        crate::tools::ensure(api, &id, deadline, diag).map(|()| key)
+    });
     match ready {
         Ok(key) => build_lease(desired.clone(), &id, "ready", Some(key), proxy),
         Err(err) => Err(cleanup(api, &id, created, err)),
@@ -349,7 +353,8 @@ fn locate(
     Ok(instance)
 }
 
-/// Looks up the existing VM for a lease; never creates or deletes.
+/// Looks up the existing VM for a lease; never creates, deletes or execs.
+/// The host key is omitted: crabbox keeps the pin from acquire/resume.
 pub fn resolve(
     request: &Request,
     api: &dyn Agent37,
@@ -377,10 +382,7 @@ pub fn resolve(
     let stripped = full.strip_prefix(&prefix(&s.owner)).unwrap_or(full);
     let name = desired.map_or(stripped, |d| &d.name);
     let (status, host_key) = match status_of(&instance) {
-        "running" => (
-            "ready",
-            Some(read_host_key(api, &instance.id).map_err(|e| e.operator_message())??),
-        ),
+        "running" => ("ready", None),
         "stopped" | "sleeping" => ("stopped", None),
         other => (other, None),
     };

@@ -174,6 +174,54 @@ fn resume_of_a_stopped_instance_starts_it_and_returns_a_fresh_host_key() {
 }
 
 #[test]
+fn resume_installs_a_missing_required_tool() {
+    let fake = FakeAgent37::start_with_key(KEY);
+    add_lease(&fake, "alice", "vmstop", "stopped", 1);
+    fake.set_missing_tools(&["rsync"]);
+    let out = run(&request(
+        &fake,
+        "resume",
+        &json!({ "lease": lease_ref("vmstop", 1) }),
+    ));
+    assert_eq!(out.code, 0, "{}", out.stdout);
+    assert_eq!(out.stdout["lease"]["status"], "ready");
+    assert!(
+        fake.missing_tools().is_empty(),
+        "{:?}",
+        fake.missing_tools()
+    );
+}
+
+#[test]
+fn resume_fails_when_a_required_tool_cannot_be_installed() {
+    let fake = FakeAgent37::start_with_key(KEY);
+    add_lease(&fake, "alice", "vmstop", "stopped", 1);
+    fake.set_missing_tools(&["rsync"]);
+    fake.set_tool_install_fails(true);
+    let out = run(&request(
+        &fake,
+        "resume",
+        &json!({ "lease": lease_ref("vmstop", 1) }),
+    ));
+    assert_ne!(out.code, 0);
+    let error = error_text(&out);
+    assert!(error.contains("lacks required tools: rsync"), "{error}");
+}
+
+#[test]
+fn resume_with_nothing_missing_succeeds() {
+    let fake = FakeAgent37::start_with_key(KEY);
+    add_lease(&fake, "alice", "vmstop", "stopped", 1);
+    let out = run(&request(
+        &fake,
+        "resume",
+        &json!({ "lease": lease_ref("vmstop", 1) }),
+    ));
+    assert_eq!(out.code, 0, "{}", out.stdout);
+    assert!(fake.missing_tools().is_empty());
+}
+
+#[test]
 fn resume_waits_out_a_cold_boot_where_ssh_is_not_ready() {
     let fake = FakeAgent37::start_with_key(KEY);
     add_lease(&fake, "alice", "vmstop", "stopped", 1);

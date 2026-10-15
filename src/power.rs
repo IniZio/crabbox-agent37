@@ -114,6 +114,8 @@ pub fn resume(
     }
     let _ = writeln!(diag, "resume: reading host key");
     let key = fetch_host_key(api, &id, deadline)?;
+    let _ = writeln!(diag, "resume: checking required tools");
+    crate::tools::ensure(api, &id, deadline, diag)?;
     let lease = request.lease.as_ref();
     let pick = |given: Option<&String>, meta: &str| {
         given
