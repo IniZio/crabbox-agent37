@@ -200,15 +200,17 @@ impl FakeAgent37 {
         self.lock().instances.clone()
     }
 
-    /// Registers an OpenSSH public key line with the workspace.
+    /// Registers an SSH key by its `SHA256:` fingerprint, as the real API lists keys.
     #[allow(dead_code, reason = "each test binary uses a different subset")]
-    pub(crate) fn add_ssh_key(&self, public_key: &str) {
+    pub(crate) fn add_ssh_key(&self, fingerprint: &str) {
         let mut state = self.lock();
         let id = format!("key_{}", state.ssh_keys.len() + 1);
         state.ssh_keys.push(json!({
             "id": id,
-            "public_key": public_key,
             "name": "test key",
+            "fingerprint": fingerprint,
+            "type": "ssh-ed25519",
+            "created": 1_792_075_879,
         }));
         drop(state);
     }
@@ -452,10 +454,16 @@ fn exec(state: &mut State, id: &str, body: &str) -> (u16, Value) {
     }
     let generation = state.key_generations.get(id).copied().unwrap_or(0);
     let parsed: Value = serde_json::from_str(body).unwrap_or(Value::Null);
-    if parsed["command"] == "cat /etc/ssh/ssh_host_ed25519_key.pub" && parsed["user"] == "root" {
+    let command = parsed["command"].as_str().unwrap_or_default();
+    if parsed["user"] == "root" && command.contains("/.agent37/etc/ssh_host_ed25519_key") {
         (
             200,
-            json!({ "exit_code": 0, "stdout": format!("{} root@{id}\n", key_for_generation(id, generation)), "stderr": "" }),
+            json!({ "exit_code": 0, "stdout": format!("{}\n", key_for_generation(id, generation)), "stderr": "" }),
+        )
+    } else if parsed["user"] == "root" && command == "cat /etc/ssh/ssh_host_ed25519_key.pub" {
+        (
+            200,
+            json!({ "exit_code": 1, "stdout": "", "stderr": "cat: /etc/ssh/ssh_host_ed25519_key.pub: No such file or directory\n" }),
         )
     } else {
         (

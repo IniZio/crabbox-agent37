@@ -99,6 +99,7 @@ dependencies = [
 name = "crabbox-agent37"
 version = "0.1.0"
 dependencies = [
+ "ring",
  "rustls",
  "serde",
  "serde_json",

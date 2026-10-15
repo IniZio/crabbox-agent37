@@ -105,11 +105,12 @@ agent37 auto-sleep stays off: the adapter creates instances with auto-sleep disa
 ## Operations
 
 - `doctor` checks that the workspace is reachable, that VMs are available, and that the SSH key is registered. It is read-only. It only lists instances and SSH keys. It never creates, changes or deletes anything.
+  - The SSH key check compares the SHA256 fingerprint of the local `<sshKey>.pub` (as `ssh-keygen -lf` prints it) with the fingerprints from `GET /v1/ssh-keys`.
   - If the workspace already has a `type: vm` instance, doctor reports "VM instances available".
   - Otherwise doctor reports that VM availability is unknown until the first acquire. This is a note, not a failure.
   - agent37 answers a VM create on an unfunded workspace with 403 `tier_limit`. The adapter reports this as "workspace not funded for VM instances".
 
-- `acquire` finds or creates the VM for the lease, waits until it runs and accepts exec, and returns the lease with the VM's SSH host key. It never starts a stopped VM. On a stopped instance it fails with "instance <id> is stopped; run crabbox resume".
+- `acquire` finds or creates the VM for the lease, waits until it runs and accepts exec, and returns the lease with the VM's SSH host key. If acquire fails after it created a VM, it deletes that VM, even when crabbox asked to keep it. Keep applies only to a lease that acquire returned. It never deletes a VM it did not create in that call. It never starts a stopped VM. On a stopped instance it fails with "instance <id> is stopped; run crabbox resume".
 - `resolve` looks up the existing VM for a lease and returns it. It never creates or deletes. It reports a stopped lease without reading its host key, which is what crabbox needs before `pause` and `resume`.
 - `list` returns this owner's VM leases, sorted by name, then cloud id.
 - `release` deletes the requested instance after checking it matches the lease. An instance that is already gone counts as released.
@@ -118,6 +119,8 @@ agent37 auto-sleep stays off: the adapter creates instances with auto-sleep disa
 - `pause` stops the instance and returns once it reports stopped. On an already stopped instance it succeeds without calling the API.
 - `resume` starts the instance (a cold boot), waits for running and for the VM to accept exec and ssh, and returns the lease with a freshly read SSH host key. The key can change when agent37 moves the instance to another host. On an already running instance it does not call start.
 - `pause` and `resume` wait at most `readyTimeoutSeconds`. crabbox sends them only when `external.capabilities.pauseResume: true` is set in trusted user config.
+
+The adapter reads the VM's ed25519 SSH host key over the agent37 exec API as root, for `acquire`, `resolve` (on a running lease) and `resume`. It uses the `HostKey` from the image's sshd config `/.agent37/etc/sshd_config` (on agent37 images, `/.agent37/etc/ssh_host_ed25519_key`) and prints its `.pub` if present. Otherwise it derives the public key on the VM, with `ssh-keygen -y` when installed or by reading the public part of the unencrypted OpenSSH private key file. Only the public key leaves the VM. If the sshd config names no usable key, it falls back to `/etc/ssh/ssh_host_ed25519_key`.
 
 `release`, `list` and `cleanup` touch only this owner's instances: the name must start with `crabbox-<owner>--` and the `crabbox_owner` metadata must match. `pause` and `resume` hold to the same rule and refuse an instance whose id differs from the requested cloudId, or that does not match the lease id or name.
 
