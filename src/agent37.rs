@@ -61,14 +61,67 @@ impl fmt::Display for ApiError {
     }
 }
 
+/// Operator message for a workspace whose tier does not allow VM instances.
+pub const NOT_FUNDED_FOR_VM: &str = "workspace not funded for VM instances";
+
+impl ApiError {
+    /// Text to show an operator: a known cause in plain words, else the Display text.
+    #[must_use]
+    pub fn operator_message(&self) -> String {
+        match self {
+            Self::Http {
+                status: 403,
+                code: Some(code),
+                ..
+            } if code == "tier_limit" => NOT_FUNDED_FOR_VM.to_owned(),
+            other => other.to_string(),
+        }
+    }
+}
+
 /// The agent37 REST calls the adapter makes.
 pub trait Agent37 {
     /// `GET /v1/instances`.
     fn list_instances(&self) -> Result<Vec<Instance>, ApiError>;
     /// `GET /v1/ssh-keys`.
     fn list_ssh_keys(&self) -> Result<Vec<SshKey>, ApiError>;
-    /// `POST /v1/instances` for a smallest-shape `type: vm` instance named `name`.
-    fn create_probe_vm(&self, name: &str) -> Result<Instance, ApiError>;
     /// `DELETE /v1/instances/{id}`.
     fn delete_instance(&self, id: &str) -> Result<(), ApiError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// HTTP error with an optional agent37 code.
+    fn http(status: u16, code: Option<&str>) -> ApiError {
+        ApiError::Http {
+            status,
+            code: code.map(Into::into),
+            message: "m".into(),
+        }
+    }
+
+    #[test]
+    fn tier_limit_403_maps_to_not_funded() {
+        assert_eq!(
+            http(403, Some("tier_limit")).operator_message(),
+            NOT_FUNDED_FOR_VM
+        );
+    }
+
+    #[test]
+    fn other_403_code_is_not_mapped() {
+        let err = http(403, Some("forbidden"));
+        assert_ne!(err.operator_message(), NOT_FUNDED_FOR_VM);
+        assert_eq!(err.operator_message(), err.to_string());
+    }
+
+    #[test]
+    fn unauthorized_is_not_mapped() {
+        assert_ne!(
+            http(401, Some("tier_limit")).operator_message(),
+            NOT_FUNDED_FOR_VM
+        );
+    }
 }

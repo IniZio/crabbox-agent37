@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 use std::time::Duration;
 
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::agent37::{Agent37, ApiError, Instance, SshKey};
 use crate::key::ApiKey;
@@ -192,22 +192,6 @@ impl Agent37 for HttpAgent37 {
             .collect())
     }
 
-    fn create_probe_vm(&self, name: &str) -> Result<Instance, ApiError> {
-        let body = json!({
-            "type": "vm",
-            "template": "agent37-ubuntu",
-            "name": name,
-            "resources": { "cpu": 2, "memory": 4 },
-            "auto_sleep": false,
-        });
-        let result = self
-            .agent
-            .post(self.url("/v1/instances"))
-            .header("Authorization", self.bearer())
-            .send_json(body);
-        decode::<WireInstance>(&Self::into_body(result)?).map(Instance::from)
-    }
-
     fn delete_instance(&self, id: &str) -> Result<(), ApiError> {
         let result = self
             .agent
@@ -220,6 +204,8 @@ impl Agent37 for HttpAgent37 {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
 
     #[test]
