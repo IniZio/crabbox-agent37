@@ -6,6 +6,8 @@
 pub mod agent37;
 pub mod api;
 pub mod doctor;
+mod fingerprint;
+mod host_key;
 pub mod inventory;
 pub mod key;
 pub mod lease;
