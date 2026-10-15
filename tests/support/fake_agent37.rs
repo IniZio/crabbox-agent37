@@ -124,6 +124,26 @@ impl FakeAgent37 {
         self.lock().instances.push(instance);
     }
 
+    /// Seeds an instance with an explicit `status` and string `metadata`.
+    #[allow(dead_code, reason = "each test binary uses a different subset")]
+    pub(crate) fn add_instance_with_metadata(
+        &self,
+        id: &str,
+        name: &str,
+        kind: &str,
+        status: &str,
+        metadata: &[(&str, &str)],
+    ) {
+        let mut instance = instance_json(id, name, kind);
+        instance["status"] = json!(status);
+        let map: serde_json::Map<String, Value> = metadata
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), json!(v)))
+            .collect();
+        instance["metadata"] = Value::Object(map);
+        self.lock().instances.push(instance);
+    }
+
     /// Sets the status new instances get (default `running`).
     #[allow(dead_code, reason = "each test binary uses a different subset")]
     pub(crate) fn set_create_status(&self, status: &str) {

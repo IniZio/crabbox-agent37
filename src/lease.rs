@@ -20,9 +20,9 @@ const READY_CHECK: &str = "command -v bash >/dev/null && command -v git >/dev/nu
 const POLL: Duration = Duration::from_secs(1);
 
 /// Validated adapter settings from the request config.
-struct Settings {
+pub(crate) struct Settings {
     /// Workspace-unique owner label embedded in instance names.
-    owner: String,
+    pub(crate) owner: String,
     /// `us` or `eu`.
     region: String,
     /// Seconds to wait for a running VM with a readable host key.
@@ -32,7 +32,7 @@ struct Settings {
 }
 
 /// Reads and validates `owner`, `region`, `readyTimeoutSeconds` and `keyFile`.
-fn settings(config: &Value) -> Result<Settings, String> {
+pub(crate) fn settings(config: &Value) -> Result<Settings, String> {
     let owner = config
         .get("owner")
         .and_then(Value::as_str)
@@ -67,7 +67,7 @@ fn label_ok(s: &str) -> bool {
 }
 
 /// Prefix shared by every instance of one owner.
-fn prefix(owner: &str) -> String {
+pub(crate) fn prefix(owner: &str) -> String {
     format!("crabbox-{owner}--")
 }
 

@@ -13,6 +13,20 @@ pub struct Instance {
     pub kind: Option<String>,
     /// Lifecycle status such as `running` or `stopped`.
     pub status: Option<String>,
+    /// Metadata set at create, string values only, in key order.
+    pub metadata: Vec<(String, String)>,
+}
+
+impl Instance {
+    /// Value of metadata `key`, or `None` when the key is absent or its value is empty.
+    #[must_use]
+    pub fn meta(&self, key: &str) -> Option<&str> {
+        self.metadata
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+            .filter(|v| !v.is_empty())
+    }
 }
 
 /// One SSH public key registered with the workspace.
@@ -124,6 +138,28 @@ pub trait Agent37 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Instance carrying the given metadata.
+    fn with_meta(metadata: &[(&str, &str)]) -> Instance {
+        Instance {
+            id: "i".into(),
+            name: None,
+            kind: None,
+            status: None,
+            metadata: metadata
+                .iter()
+                .map(|(k, v)| ((*k).into(), (*v).into()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn meta_present_absent_and_empty() {
+        let i = with_meta(&[("crabbox_owner", "me"), ("crabbox_slug", "")]);
+        assert_eq!(i.meta("crabbox_owner"), Some("me"));
+        assert_eq!(i.meta("crabbox_lease_id"), None);
+        assert_eq!(i.meta("crabbox_slug"), None);
+    }
 
     /// HTTP error with an optional agent37 code.
     fn http(status: u16, code: Option<&str>) -> ApiError {

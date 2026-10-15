@@ -6,6 +6,7 @@
 pub mod agent37;
 pub mod api;
 pub mod doctor;
+pub mod inventory;
 pub mod key;
 pub mod lease;
 pub mod protocol;
@@ -74,9 +75,16 @@ fn handle(input: &[u8], env_key: Option<String>, diag: &mut dyn Write) -> Result
         }
         protocol::Operation::Acquire => lease_op(&request, env_key, diag, lease::acquire),
         protocol::Operation::Resolve => lease_op(&request, env_key, diag, lease::resolve),
-        other => Err(format!(
-            "operation {} is not supported by this adapter version",
-            other.as_str()
-        )),
+        protocol::Operation::List => {
+            let rows = inventory::list(&request, &client(&request, env_key)?)?;
+            Ok(protocol::leases_response(&rows))
+        }
+        protocol::Operation::Release => {
+            inventory::release(&request, &client(&request, env_key)?)?;
+            Ok(protocol::ok_response())
+        }
+        protocol::Operation::Touch => Ok(protocol::ok_response()),
+        protocol::Operation::Cleanup => inventory::cleanup(&request, &client(&request, env_key)?)
+            .map(|m| protocol::message_response(&m)),
     }
 }

@@ -82,6 +82,19 @@ pub struct Expected {
     pub cloud_id: Option<String>,
 }
 
+/// Identifiers of an existing lease, as sent for release and touch.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LeaseRef {
+    /// Crabbox lease id.
+    pub lease_id: Option<String>,
+    /// Short lease slug.
+    pub slug: Option<String>,
+    /// Lease name.
+    pub name: Option<String>,
+    /// Provider-side instance id.
+    pub cloud_id: Option<String>,
+}
+
 /// SSH connection details of a lease.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -119,6 +132,22 @@ pub struct Lease {
     pub ssh: Ssh,
 }
 
+/// One inventory row reported by list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LeaseRow {
+    /// Crabbox lease id.
+    pub lease_id: String,
+    /// Short lease slug.
+    pub slug: String,
+    /// Lease name.
+    pub name: String,
+    /// Provider-side instance id.
+    pub cloud_id: String,
+    /// Lease status.
+    pub status: String,
+}
+
 /// A parsed request. Fields not yet needed are ignored.
 #[derive(Debug, Clone)]
 pub struct Request {
@@ -132,6 +161,12 @@ pub struct Request {
     pub expected: Option<Expected>,
     /// Keep the lease after the command finishes.
     pub keep: bool,
+    /// Existing lease, for release and touch.
+    pub lease: Option<LeaseRef>,
+    /// Report what cleanup would remove without removing it.
+    pub dry_run: bool,
+    /// Resolve without claiming the lease for use.
+    pub release_only: bool,
 }
 
 /// Non-empty string field, else `None`.
@@ -156,19 +191,16 @@ fn optional_object<T>(
     }
 }
 
-/// Parse a single request object.
-///
-/// # Errors
-///
-/// Returns a human-readable message for malformed input. Messages never
-/// include config values, which may carry secrets.
-pub fn parse_request(input: &[u8]) -> Result<Request, String> {
-    let value: Value =
-        serde_json::from_slice(input).map_err(|e| format!("invalid request JSON: {e}"))?;
-    let object = value
-        .as_object()
-        .ok_or_else(|| "request must be a JSON object".to_owned())?;
+/// Optional boolean field; absent means false.
+fn flag(object: &serde_json::Map<String, Value>, key: &str) -> Result<bool, String> {
+    object.get(key).map_or(Ok(false), |v| {
+        v.as_bool()
+            .ok_or_else(|| format!("{key} must be a boolean"))
+    })
+}
 
+/// Reject requests whose protocol version this adapter does not speak.
+fn check_version(object: &serde_json::Map<String, Value>) -> Result<(), String> {
     match object.get("protocolVersion").and_then(Value::as_u64) {
         Some(VERSION) => {}
         Some(other) => {
@@ -182,6 +214,23 @@ pub fn parse_request(input: &[u8]) -> Result<Request, String> {
             ));
         }
     }
+    Ok(())
+}
+
+/// Parse a single request object.
+///
+/// # Errors
+///
+/// Returns a human-readable message for malformed input. Messages never
+/// include config values, which may carry secrets.
+pub fn parse_request(input: &[u8]) -> Result<Request, String> {
+    let value: Value =
+        serde_json::from_slice(input).map_err(|e| format!("invalid request JSON: {e}"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "request must be a JSON object".to_owned())?;
+
+    check_version(object)?;
 
     let name = object
         .get("operation")
@@ -215,10 +264,17 @@ pub fn parse_request(input: &[u8]) -> Result<Request, String> {
             cloud_id: opt_str(o, "cloudId"),
         })
     })?;
-    let keep = object.get("keep").map_or(Ok(false), |v| {
-        v.as_bool()
-            .ok_or_else(|| "keep must be a boolean".to_owned())
+    let keep = flag(object, "keep")?;
+    let lease = optional_object(object, "lease", |o| {
+        Ok(LeaseRef {
+            lease_id: opt_str(o, "leaseId"),
+            slug: opt_str(o, "slug"),
+            name: opt_str(o, "name"),
+            cloud_id: opt_str(o, "cloudId"),
+        })
     })?;
+    let dry_run = flag(object, "dryRun")?;
+    let release_only = flag(object, "releaseOnly")?;
 
     Ok(Request {
         operation,
@@ -226,6 +282,9 @@ pub fn parse_request(input: &[u8]) -> Result<Request, String> {
         desired,
         expected,
         keep,
+        lease,
+        dry_run,
+        release_only,
     })
 }
 
@@ -242,6 +301,28 @@ pub fn message_response(message: &str) -> String {
 #[must_use]
 pub fn error_response(error: &str) -> String {
     format!(r#"{{"error":{}}}"#, Value::String(error.to_owned()))
+}
+
+/// Success response carrying inventory rows; always a JSON array.
+#[must_use]
+pub fn leases_response(rows: &[LeaseRow]) -> String {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Envelope<'a> {
+        protocol_version: u64,
+        leases: &'a [LeaseRow],
+    }
+    let envelope = Envelope {
+        protocol_version: VERSION,
+        leases: rows,
+    };
+    serde_json::to_string(&envelope).unwrap_or_default()
+}
+
+/// Success response for operations that return nothing.
+#[must_use]
+pub fn ok_response() -> String {
+    format!(r#"{{"protocolVersion":{VERSION}}}"#)
 }
 
 /// Success response carrying a lease.
@@ -261,135 +342,4 @@ pub fn lease_response(lease: &Lease) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_doctor() {
-        let req = parse_request(
-            b"{\"protocolVersion\":1,\"operation\":\"doctor\",\"config\":{\"a\":1},\"x\":2}\n",
-        )
-        .unwrap();
-        assert_eq!(req.operation, Operation::Doctor);
-        assert_eq!(req.config.get("a"), Some(&Value::from(1)));
-    }
-
-    #[test]
-    fn absent_config_is_null() {
-        let req = parse_request(br#"{"protocolVersion":1,"operation":"list"}"#).unwrap();
-        assert_eq!(req.config, Value::Null);
-    }
-
-    #[test]
-    fn rejects_version_two() {
-        let err = parse_request(br#"{"protocolVersion":2,"operation":"doctor"}"#).unwrap_err();
-        assert_eq!(
-            err,
-            "unsupported protocol version 2; this adapter speaks version 1"
-        );
-    }
-
-    #[test]
-    fn rejects_missing_version() {
-        assert!(parse_request(br#"{"operation":"doctor"}"#).is_err());
-    }
-
-    #[test]
-    fn rejects_unknown_operation() {
-        let err = parse_request(br#"{"protocolVersion":1,"operation":"foo"}"#).unwrap_err();
-        assert_eq!(err, "unknown operation \"foo\"");
-    }
-
-    #[test]
-    fn rejects_missing_operation() {
-        assert!(parse_request(br#"{"protocolVersion":1}"#).is_err());
-    }
-
-    #[test]
-    fn rejects_invalid_json() {
-        assert!(parse_request(b"not json").is_err());
-    }
-
-    #[test]
-    fn rejects_non_object_config() {
-        let err = parse_request(br#"{"protocolVersion":1,"operation":"doctor","config":"x"}"#)
-            .unwrap_err();
-        assert!(err.contains("config"));
-    }
-
-    #[test]
-    fn errors_do_not_echo_config() {
-        let err = parse_request(
-            br#"{"protocolVersion":3,"operation":"doctor","config":{"apiKey":"sk_live_secret"}}"#,
-        )
-        .unwrap_err();
-        assert!(!err.contains("sk_live_secret"));
-    }
-
-    #[test]
-    fn responses_escape_quotes() {
-        assert_eq!(
-            message_response("say \"hi\""),
-            r#"{"protocolVersion":1,"message":"say \"hi\""}"#
-        );
-        assert_eq!(error_response("a\"b"), r#"{"error":"a\"b"}"#);
-        assert_eq!(
-            message_response("ready"),
-            r#"{"protocolVersion":1,"message":"ready"}"#
-        );
-    }
-
-    fn parse(tail: &str) -> Result<Request, String> {
-        let head = r#"{"protocolVersion":1,"operation":"acquire","#;
-        parse_request(format!("{head}{tail}").as_bytes())
-    }
-
-    #[test]
-    fn parses_acquire_with_desired_class_keep() {
-        let d = r#""desired":{"leaseId":"l1","slug":"s","name":"n","class":"fast"}"#;
-        let req = parse(&format!(r#"{d},"keep":true}}"#)).unwrap();
-        assert_eq!(req.desired.unwrap().class.as_deref(), Some("fast"));
-        assert!(req.keep);
-    }
-
-    #[test]
-    fn class_absent_and_desired_errors() {
-        let req = parse(r#""desired":{"leaseId":"l1","slug":"s","name":"n"}}"#).unwrap();
-        assert_eq!(req.desired.unwrap().class, None);
-        assert!(parse(r#""desired":{"leaseId":"l1","slug":"s"}}"#).is_err());
-        assert!(parse(r#""desired":"x"}"#).is_err());
-    }
-
-    #[test]
-    fn expected_empty_fields_are_none() {
-        let req = parse(r#""expected":{"leaseId":"l1","slug":""}}"#).unwrap();
-        let (id, slug) = req.expected.map(|e| (e.lease_id, e.slug)).unwrap();
-        assert_eq!((id.as_deref(), slug), (Some("l1"), None));
-        assert!(parse(r#""expected":3}"#).is_err());
-        assert!(parse(r#""keep":"y"}"#).is_err());
-    }
-
-    #[test]
-    fn lease_response_shape() {
-        let mut lease = Lease {
-            lease_id: "l1".to_owned(),
-            slug: "s".to_owned(),
-            name: "n".to_owned(),
-            cloud_id: "vm1".to_owned(),
-            status: "ready".to_owned(),
-            ssh: Ssh {
-                user: "root".to_owned(),
-                host: "vm1.agent37.app".to_owned(),
-                port: "22".to_owned(),
-                proxy_command: "x tunnel %h".to_owned(),
-                ready_check: "true".to_owned(),
-                host_key: None,
-            },
-        };
-        let base = r#"{"protocolVersion":1,"lease":{"leaseId":"l1","slug":"s","name":"n","cloudId":"vm1","status":"ready","ssh":{"user":"root","host":"vm1.agent37.app","port":"22","proxyCommand":"x tunnel %h","readyCheck":"true""#;
-        assert_eq!(lease_response(&lease), format!("{base}}}}}}}"));
-        lease.ssh.host_key = Some("ssh-ed25519 AAAA".to_owned());
-        let with_key = format!(r#"{base},"hostKey":"ssh-ed25519 AAAA"}}}}}}"#);
-        assert_eq!(lease_response(&lease), with_key);
-    }
-}
+mod tests;

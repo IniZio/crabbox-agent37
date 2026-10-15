@@ -153,6 +153,7 @@ mod tests {
             name: None,
             kind: Some(kind.into()),
             status: None,
+            metadata: Vec::new(),
         }
     }
 
