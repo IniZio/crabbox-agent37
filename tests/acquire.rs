@@ -332,10 +332,33 @@ fn deadline_deletes_an_instance_that_never_becomes_running() {
 }
 
 #[test]
-fn deadline_with_keep_leaves_the_instance_in_place() {
+fn failed_acquire_deletes_a_created_instance_even_with_keep() {
     let fake = FakeAgent37::start_with_key(KEY);
     fake.set_create_status("provisioning");
     fake.set_polls_until_running(None);
+    let mut cfg = config(&fake);
+    cfg["readyTimeoutSeconds"] = json!(1);
+    let mut request = acquire_with(&cfg);
+    request["keep"] = json!(true);
+    let out = run_env(&request);
+    assert_eq!(out.code, 1, "{}", out.raw);
+    assert!(out.raw.contains("deleted"), "{}", out.raw);
+    assert_eq!(
+        count(&fake, "DELETE /v1/instances/"),
+        1,
+        "{:?}",
+        seen(&fake)
+    );
+    assert!(fake.instances().is_empty());
+}
+
+#[test]
+fn failed_acquire_never_deletes_a_pre_existing_instance() {
+    let fake = FakeAgent37::start_with_key(KEY);
+    let mut request = acquire(&fake);
+    request["keep"] = json!(true);
+    assert_eq!(run_env(&request).code, 0);
+    fake.set_exec_fails(true);
     let mut cfg = config(&fake);
     cfg["readyTimeoutSeconds"] = json!(1);
     let mut request = acquire_with(&cfg);

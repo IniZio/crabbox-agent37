@@ -100,6 +100,18 @@ fn decodes_string_metadata_in_key_order() {
 }
 
 #[test]
+fn real_ssh_key_item_shape_deserializes() {
+    let body = r#"{"data":[{"id":"0688","name":"engine-03","fingerprint":"SHA256:+H2O2zoCMvtKtSi+xm3brOT1TZEPrpx7LXC63NAPh+I","type":"ssh-ed25519","created":1792075879}]}"#;
+    let listing: Listing<WireKey> = serde_json::from_str(body).unwrap();
+    let key = listing.data.first().unwrap();
+    assert_eq!(key.id, "0688");
+    assert_eq!(
+        key.fingerprint,
+        "SHA256:+H2O2zoCMvtKtSi+xm3brOT1TZEPrpx7LXC63NAPh+I"
+    );
+}
+
+#[test]
 fn null_or_missing_metadata_is_empty() {
     for body in [json!({"id": "a", "metadata": null}), json!({"id": "a"})] {
         let wire: WireInstance = serde_json::from_value(body).unwrap();

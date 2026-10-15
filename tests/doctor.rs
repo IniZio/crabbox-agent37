@@ -23,7 +23,11 @@ use tempfile::TempDir;
 const KEY: &str = "sk_test_fake";
 /// Public key line registered in the happy-path setups.
 const PUBLIC_KEY: &str =
-    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeBlobForTestsOnly12345678 test@host";
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJlZ0gXrALKGEWsS+kA1LLDUZcLk4CltFvNIuPq9OtLj test@host";
+/// `ssh-keygen -lf` fingerprint of `PUBLIC_KEY`.
+const FINGERPRINT: &str = "SHA256:f+JPHm/uYZhyNS4vkfmPUFh680JmATOqj9fbmPyq8T8";
+/// Fingerprint of some other key.
+const OTHER_FINGERPRINT: &str = "SHA256:+H2O2zoCMvtKtSi+xm3brOT1TZEPrpx7LXC63NAPh+I";
 
 /// A fake server plus key files on disk.
 struct Setup {
@@ -37,19 +41,18 @@ impl Setup {
     /// Fake with `KEY`, an SSH keypair on disk and its public key registered.
     fn new() -> Self {
         let setup = Self::unregistered();
-        setup.fake.add_ssh_key(PUBLIC_KEY);
+        setup.fake.add_ssh_key(FINGERPRINT);
         setup
     }
 
-    /// Like `new` but the public key is not registered with the workspace.
+    /// Like `new` but only a different key is registered with the workspace.
     fn unregistered() -> Self {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("id_ed25519"), "private\n").unwrap();
         std::fs::write(dir.path().join("id_ed25519.pub"), format!("{PUBLIC_KEY}\n")).unwrap();
-        Self {
-            dir,
-            fake: FakeAgent37::start_with_key(KEY),
-        }
+        let fake = FakeAgent37::start_with_key(KEY);
+        fake.add_ssh_key(OTHER_FINGERPRINT);
+        Self { dir, fake }
     }
 
     /// Writes an API key file with `mode`.
