@@ -13,7 +13,7 @@ mod fake_agent37;
 
 use std::process::{Command, Stdio};
 
-use fake_agent37::{expected_host_key, FakeAgent37};
+use fake_agent37::FakeAgent37;
 use serde_json::{json, Value};
 
 /// Key the fake accepts.
@@ -133,8 +133,24 @@ fn expected_fields_are_repeated_exactly_with_name_host_key_and_host() {
     assert_eq!(lease["status"], "ready");
     assert_eq!(lease["ssh"]["user"], "root");
     assert_eq!(lease["ssh"]["host"], format!("{ID}.agent37.app"));
-    assert_eq!(lease["ssh"]["hostKey"], expected_host_key(ID));
+    assert!(
+        lease["ssh"].get("hostKey").is_none(),
+        "hostKey in {}",
+        lease["ssh"]
+    );
     assert_sent_no_creates_or_deletes(&fake);
+}
+
+#[test]
+fn running_instance_resolves_with_only_get_requests() {
+    let fake = seeded();
+    let out = run(&resolve(&fake, Some(&desired()), &json!({ "cloudId": ID })));
+    assert_eq!(out.lease()["status"], "ready");
+    let non_get: Vec<String> = seen(&fake)
+        .into_iter()
+        .filter(|r| !r.starts_with("GET "))
+        .collect();
+    assert!(non_get.is_empty(), "non-GET requests: {non_get:?}");
 }
 
 #[test]
@@ -151,7 +167,11 @@ fn only_expected_derives_name_by_stripping_the_owner_prefix() {
     assert_eq!(lease["slug"], "blue-crab");
     assert_eq!(lease["name"], SHORT_NAME);
     assert_eq!(lease["cloudId"], ID);
-    assert_eq!(lease["ssh"]["hostKey"], expected_host_key(ID));
+    assert!(
+        lease["ssh"].get("hostKey").is_none(),
+        "hostKey in {}",
+        lease["ssh"]
+    );
     assert_sent_no_creates_or_deletes(&fake);
 }
 
@@ -166,7 +186,11 @@ fn desired_without_cloud_id_finds_the_instance_by_name() {
     assert_eq!(lease["name"], SHORT_NAME);
     assert_eq!(lease["status"], "ready");
     assert_eq!(lease["ssh"]["host"], format!("{ID}.agent37.app"));
-    assert_eq!(lease["ssh"]["hostKey"], expected_host_key(ID));
+    assert!(
+        lease["ssh"].get("hostKey").is_none(),
+        "hostKey in {}",
+        lease["ssh"]
+    );
     assert_sent_no_creates_or_deletes(&fake);
 }
 
