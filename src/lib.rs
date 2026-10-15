@@ -9,6 +9,7 @@ pub mod doctor;
 pub mod key;
 pub mod lease;
 pub mod protocol;
+pub mod tunnel;
 
 use std::io::Write;
 
