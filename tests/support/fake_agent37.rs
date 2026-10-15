@@ -7,6 +7,7 @@
     reason = "test support fails loudly on malformed traffic"
 )]
 
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -54,6 +55,14 @@ struct State {
     requests: Vec<RecordedRequest>,
     /// Counter for generated ids.
     next_id: u32,
+    /// Status given to freshly created instances.
+    create_status: String,
+    /// GETs of an instance before provisioning|starting turns running; `None` = never.
+    polls_until_running: Option<u32>,
+    /// GET counts per instance id.
+    polls: HashMap<String, u32>,
+    /// Whether exec answers 502 `provisioning_failed`.
+    exec_fails: bool,
 }
 
 /// Handle to a running fake; the server thread lives until the test process exits.
@@ -76,6 +85,10 @@ impl FakeAgent37 {
             vm_tier_limited: false,
             requests: Vec::new(),
             next_id: 1,
+            create_status: "running".to_owned(),
+            polls_until_running: None,
+            polls: HashMap::new(),
+            exec_fails: false,
         }));
         let shared = Arc::clone(&state);
         thread::spawn(move || {
@@ -98,11 +111,55 @@ impl FakeAgent37 {
     }
 
     /// Seeds an instance of the given `kind` (`vm`, `container`, ...).
+    #[allow(dead_code, reason = "each test binary uses a different subset")]
     pub(crate) fn add_instance(&self, id: &str, name: &str, kind: &str) {
         self.lock().instances.push(instance_json(id, name, kind));
     }
 
+    /// Seeds an instance with an explicit `status`.
+    #[allow(dead_code, reason = "each test binary uses a different subset")]
+    pub(crate) fn add_instance_with_status(&self, id: &str, name: &str, kind: &str, status: &str) {
+        let mut instance = instance_json(id, name, kind);
+        instance["status"] = json!(status);
+        self.lock().instances.push(instance);
+    }
+
+    /// Sets the status new instances get (default `running`).
+    #[allow(dead_code, reason = "each test binary uses a different subset")]
+    pub(crate) fn set_create_status(&self, status: &str) {
+        status.clone_into(&mut self.lock().create_status);
+    }
+
+    /// Sets how many GETs of an instance pass before provisioning|starting turns running.
+    #[allow(dead_code, reason = "each test binary uses a different subset")]
+    pub(crate) fn set_polls_until_running(&self, polls: Option<u32>) {
+        self.lock().polls_until_running = polls;
+    }
+
+    /// Makes exec answer 502 `provisioning_failed`.
+    #[allow(dead_code, reason = "each test binary uses a different subset")]
+    pub(crate) fn set_exec_fails(&self, fails: bool) {
+        self.lock().exec_fails = fails;
+    }
+
+    /// The instance object with `id`, if present.
+    #[allow(dead_code, reason = "each test binary uses a different subset")]
+    pub(crate) fn instance(&self, id: &str) -> Option<Value> {
+        self.lock()
+            .instances
+            .iter()
+            .find(|i| i["id"] == id)
+            .cloned()
+    }
+
+    /// All instance objects.
+    #[allow(dead_code, reason = "each test binary uses a different subset")]
+    pub(crate) fn instances(&self) -> Vec<Value> {
+        self.lock().instances.clone()
+    }
+
     /// Registers an OpenSSH public key line with the workspace.
+    #[allow(dead_code, reason = "each test binary uses a different subset")]
     pub(crate) fn add_ssh_key(&self, public_key: &str) {
         let mut state = self.lock();
         let id = format!("key_{}", state.ssh_keys.len() + 1);
@@ -115,6 +172,7 @@ impl FakeAgent37 {
     }
 
     /// Makes `POST /v1/instances` with `type: vm` fail like an unfunded workspace.
+    #[allow(dead_code, reason = "each test binary uses a different subset")]
     pub(crate) fn set_vm_tier_limited(&self, limited: bool) {
         self.lock().vm_tier_limited = limited;
     }
@@ -123,6 +181,18 @@ impl FakeAgent37 {
     pub(crate) fn requests(&self) -> Vec<RecordedRequest> {
         self.lock().requests.clone()
     }
+}
+
+/// The host key line the fake serves for instance `id`.
+#[allow(dead_code, reason = "each test binary uses a different subset")]
+pub(crate) fn host_key_line(id: &str) -> String {
+    format!("{} root@{id}\n", expected_host_key(id))
+}
+
+/// The key material (no comment, no newline) crabbox should pin for `id`.
+#[allow(dead_code, reason = "each test binary uses a different subset")]
+pub(crate) fn expected_host_key(id: &str) -> String {
+    format!("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI{id}")
 }
 
 /// An instance API object.
@@ -140,7 +210,9 @@ fn serve(stream: TcpStream, state: &Mutex<State>) {
         200 => "OK",
         201 => "Created",
         401 => "Unauthorized",
+        400 => "Bad Request",
         403 => "Forbidden",
+        502 => "Bad Gateway",
         _ => "Not Found",
     };
     let payload = body.to_string();
@@ -208,6 +280,16 @@ fn route(request: &RecordedRequest, state: &Mutex<State>) -> (u16, Value) {
         ("GET", "/v1/instances") => (200, json!({ "data": state.instances })),
         ("GET", "/v1/ssh-keys") => (200, json!({ "data": state.ssh_keys })),
         ("POST", "/v1/instances") => create_instance(&mut state, &request.body),
+        ("GET", _) if path.starts_with("/v1/instances/") => {
+            let id = path.trim_start_matches("/v1/instances/");
+            get_instance(&mut state, id)
+        }
+        ("POST", _) if path.starts_with("/v1/instances/") && path.ends_with("/exec") => {
+            let id = path
+                .trim_start_matches("/v1/instances/")
+                .trim_end_matches("/exec");
+            exec(&state, id, &request.body)
+        }
         ("DELETE", _) if path.starts_with("/v1/instances/") => {
             let id = path.trim_start_matches("/v1/instances/");
             let before = state.instances.len();
@@ -235,10 +317,67 @@ fn create_instance(state: &mut State, body: &str) -> (u16, Value) {
             ),
         );
     }
-    let id = format!("inst_{}", state.next_id);
+    let id = format!("vm{:08}", state.next_id);
     state.next_id += 1;
     let name = parsed["name"].as_str().unwrap_or("unnamed");
-    let created = instance_json(&id, name, &kind);
+    let mut created = instance_json(&id, name, &kind);
+    created["status"] = json!(state.create_status);
+    for field in ["region", "resources", "metadata", "auto_sleep"] {
+        if !parsed[field].is_null() {
+            created[field] = parsed[field].clone();
+        }
+    }
     state.instances.push(created.clone());
     (201, created)
+}
+
+/// Handles `GET /v1/instances/{id}`, advancing provisioning instances.
+fn get_instance(state: &mut State, id: &str) -> (u16, Value) {
+    let count = state.polls.entry(id.to_owned()).or_insert(0);
+    let seen = *count;
+    *count += 1;
+    let promote = state.polls_until_running.is_some_and(|n| seen >= n);
+    let Some(instance) = state.instances.iter_mut().find(|i| i["id"] == id) else {
+        return (404, nested_error("not_found", "Instance not found."));
+    };
+    if promote
+        && matches!(
+            instance["status"].as_str(),
+            Some("provisioning" | "starting")
+        )
+    {
+        instance["status"] = json!("running");
+    }
+    (200, instance.clone())
+}
+
+/// Handles `POST /v1/instances/{id}/exec`.
+fn exec(state: &State, id: &str, body: &str) -> (u16, Value) {
+    let Some(instance) = state.instances.iter().find(|i| i["id"] == id) else {
+        return (404, nested_error("not_found", "Instance not found."));
+    };
+    if state.exec_fails {
+        return (
+            502,
+            nested_error("provisioning_failed", "VM provisioning failed."),
+        );
+    }
+    if instance["status"] != "running" {
+        return (
+            400,
+            nested_error("invalid_request", "Instance is not running."),
+        );
+    }
+    let parsed: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+    if parsed["command"] == "cat /etc/ssh/ssh_host_ed25519_key.pub" && parsed["user"] == "root" {
+        (
+            200,
+            json!({ "exit_code": 0, "stdout": host_key_line(id), "stderr": "" }),
+        )
+    } else {
+        (
+            200,
+            json!({ "exit_code": 127, "stdout": "", "stderr": "command not found" }),
+        )
+    }
 }

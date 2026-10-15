@@ -4,10 +4,13 @@ use std::fmt::Write as _;
 use std::time::Duration;
 
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{json, Map, Value};
 
-use crate::agent37::{Agent37, ApiError, Instance, SshKey};
+use crate::agent37::{Agent37, ApiError, CreateSpec, ExecOutput, Instance, SshKey};
 use crate::key::ApiKey;
+
+/// Image every crabbox VM is created from.
+const TEMPLATE: &str = "agent37-ubuntu";
 
 /// Production API root, used when the config carries no `apiUrl`.
 const DEFAULT_BASE_URL: &str = "https://api.agent37.com";
@@ -89,6 +92,49 @@ impl HttpAgent37 {
             .call();
         decode(&Self::into_body(result)?)
     }
+
+    /// POST `body` as JSON to `path` and decode the JSON response.
+    fn post<T: for<'de> Deserialize<'de>>(&self, path: &str, body: &Value) -> Result<T, ApiError> {
+        let result = self
+            .agent
+            .post(self.url(path))
+            .header("Authorization", self.bearer())
+            .send_json(body);
+        decode(&Self::into_body(result)?)
+    }
+}
+
+/// Request body for creating an instance.
+///
+/// Deliberately carries no `env` (no secrets in the instance) and no `budget` (managed budget stays at zero).
+fn create_body(spec: &CreateSpec) -> Value {
+    let metadata: Map<String, Value> = spec
+        .metadata
+        .iter()
+        .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+        .collect();
+    json!({
+        "template": TEMPLATE,
+        "type": "vm",
+        "region": spec.region,
+        "name": spec.name,
+        "resources": {"cpu": spec.cpu, "memory": spec.memory_gb},
+        "metadata": metadata,
+        "auto_sleep": false,
+    })
+}
+
+/// Exec result as agent37 serialises it.
+#[derive(Deserialize)]
+struct WireExec {
+    /// Process exit status.
+    exit_code: i64,
+    /// Captured standard output.
+    #[serde(default)]
+    stdout: String,
+    /// Captured standard error.
+    #[serde(default)]
+    stderr: String,
 }
 
 /// Parse a JSON body.
@@ -200,6 +246,26 @@ impl Agent37 for HttpAgent37 {
             .call();
         Self::into_body(result).map(|_| ())
     }
+
+    fn get_instance(&self, id: &str) -> Result<Instance, ApiError> {
+        let wire: WireInstance = self.get(&format!("/v1/instances/{}", encode_segment(id)))?;
+        Ok(wire.into())
+    }
+
+    fn create_instance(&self, spec: &CreateSpec) -> Result<Instance, ApiError> {
+        let wire: WireInstance = self.post("/v1/instances", &create_body(spec))?;
+        Ok(wire.into())
+    }
+
+    fn exec_as_root(&self, id: &str, command: &str) -> Result<ExecOutput, ApiError> {
+        let path = format!("/v1/instances/{}/exec", encode_segment(id));
+        let wire: WireExec = self.post(&path, &json!({"command": command, "user": "root"}))?;
+        Ok(ExecOutput {
+            exit_code: wire.exit_code,
+            stdout: wire.stdout,
+            stderr: wire.stderr,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -251,6 +317,40 @@ mod tests {
                 message: "HTTP 502".into()
             }
         );
+    }
+
+    /// Spec used by the create body tests.
+    fn spec() -> CreateSpec {
+        CreateSpec {
+            name: "crabbox-me--box".into(),
+            region: "us".into(),
+            cpu: 2,
+            memory_gb: 4,
+            metadata: vec![("crabbox_owner".into(), "me".into())],
+        }
+    }
+
+    #[test]
+    fn create_body_is_exact() {
+        assert_eq!(
+            create_body(&spec()),
+            json!({
+                "template": "agent37-ubuntu",
+                "type": "vm",
+                "region": "us",
+                "name": "crabbox-me--box",
+                "resources": {"cpu": 2, "memory": 4},
+                "metadata": {"crabbox_owner": "me"},
+                "auto_sleep": false
+            })
+        );
+    }
+
+    #[test]
+    fn create_body_has_no_env_or_budget() {
+        let body = create_body(&spec());
+        let object = body.as_object();
+        assert!(object.is_some_and(|o| !o.contains_key("env") && !o.contains_key("budget")));
     }
 
     #[test]

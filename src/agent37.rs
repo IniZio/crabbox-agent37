@@ -24,6 +24,32 @@ pub struct SshKey {
     pub public_key: String,
 }
 
+/// What `create_instance` asks agent37 for. The request body is built only from these fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateSpec {
+    /// Instance name.
+    pub name: String,
+    /// Region, `us` or `eu`.
+    pub region: String,
+    /// vCPU count.
+    pub cpu: u32,
+    /// Memory in GB.
+    pub memory_gb: u32,
+    /// String metadata attached to the instance.
+    pub metadata: Vec<(String, String)>,
+}
+
+/// Result of one exec call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecOutput {
+    /// Process exit code; nonzero is still a successful call.
+    pub exit_code: i64,
+    /// Captured standard output.
+    pub stdout: String,
+    /// Captured standard error.
+    pub stderr: String,
+}
+
 /// A failed agent37 call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApiError {
@@ -87,6 +113,12 @@ pub trait Agent37 {
     fn list_ssh_keys(&self) -> Result<Vec<SshKey>, ApiError>;
     /// `DELETE /v1/instances/{id}`.
     fn delete_instance(&self, id: &str) -> Result<(), ApiError>;
+    /// `GET /v1/instances/{id}`.
+    fn get_instance(&self, id: &str) -> Result<Instance, ApiError>;
+    /// `POST /v1/instances`.
+    fn create_instance(&self, spec: &CreateSpec) -> Result<Instance, ApiError>;
+    /// `POST /v1/instances/{id}/exec`, run as root.
+    fn exec_as_root(&self, id: &str, command: &str) -> Result<ExecOutput, ApiError>;
 }
 
 #[cfg(test)]

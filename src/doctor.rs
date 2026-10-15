@@ -112,7 +112,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::agent37::SshKey;
+    use crate::agent37::{CreateSpec, ExecOutput, SshKey};
 
     /// Scripted API; records deletes.
     struct Fake {
@@ -134,6 +134,15 @@ mod tests {
         fn delete_instance(&self, id: &str) -> Result<(), ApiError> {
             self.deleted.borrow_mut().push(id.to_owned());
             Ok(())
+        }
+        fn get_instance(&self, _id: &str) -> Result<Instance, ApiError> {
+            Err(ApiError::Unreachable("not used by doctor".into()))
+        }
+        fn create_instance(&self, _spec: &CreateSpec) -> Result<Instance, ApiError> {
+            Err(ApiError::Unreachable("not used by doctor".into()))
+        }
+        fn exec_as_root(&self, _id: &str, _command: &str) -> Result<ExecOutput, ApiError> {
+            Err(ApiError::Unreachable("not used by doctor".into()))
         }
     }
 
