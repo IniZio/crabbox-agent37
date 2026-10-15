@@ -1,5 +1,6 @@
 //! HTTP implementation of [`Agent37`] over ureq.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::time::Duration;
 
@@ -161,6 +162,9 @@ struct WireInstance {
     kind: Option<String>,
     /// Lifecycle status.
     status: Option<String>,
+    /// Metadata set at create; absent or `null` on instances created elsewhere.
+    #[serde(default)]
+    metadata: Option<BTreeMap<String, Value>>,
 }
 
 impl From<WireInstance> for Instance {
@@ -170,6 +174,15 @@ impl From<WireInstance> for Instance {
             name: w.name,
             kind: w.kind,
             status: w.status,
+            metadata: w
+                .metadata
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|(k, v)| match v {
+                    Value::String(s) => Some((k, s)),
+                    _ => None,
+                })
+                .collect(),
         }
     }
 }
@@ -269,92 +282,4 @@ impl Agent37 for HttpAgent37 {
 }
 
 #[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::*;
-
-    #[test]
-    fn base_url_trims_and_defaults() {
-        assert_eq!(base_url(&json!({"apiUrl": "http://x:1//"})), "http://x:1");
-        assert_eq!(base_url(&json!({})), DEFAULT_BASE_URL);
-        assert_eq!(base_url(&json!({"apiUrl": 3})), DEFAULT_BASE_URL);
-    }
-
-    #[test]
-    fn envelope_error() {
-        let body = r#"{"error":{"code":"tier_limit","message":"no vms"}}"#;
-        assert_eq!(
-            http_error(403, body),
-            ApiError::Http {
-                status: 403,
-                code: Some("tier_limit".into()),
-                message: "no vms".into()
-            }
-        );
-    }
-
-    #[test]
-    fn flat_error() {
-        let body = r#"{"error":"invalid_api_key","message":"bad key"}"#;
-        assert_eq!(
-            http_error(401, body),
-            ApiError::Http {
-                status: 401,
-                code: Some("invalid_api_key".into()),
-                message: "bad key".into()
-            }
-        );
-    }
-
-    #[test]
-    fn unparsable_error_uses_status() {
-        assert_eq!(
-            http_error(502, "<html>"),
-            ApiError::Http {
-                status: 502,
-                code: None,
-                message: "HTTP 502".into()
-            }
-        );
-    }
-
-    /// Spec used by the create body tests.
-    fn spec() -> CreateSpec {
-        CreateSpec {
-            name: "crabbox-me--box".into(),
-            region: "us".into(),
-            cpu: 2,
-            memory_gb: 4,
-            metadata: vec![("crabbox_owner".into(), "me".into())],
-        }
-    }
-
-    #[test]
-    fn create_body_is_exact() {
-        assert_eq!(
-            create_body(&spec()),
-            json!({
-                "template": "agent37-ubuntu",
-                "type": "vm",
-                "region": "us",
-                "name": "crabbox-me--box",
-                "resources": {"cpu": 2, "memory": 4},
-                "metadata": {"crabbox_owner": "me"},
-                "auto_sleep": false
-            })
-        );
-    }
-
-    #[test]
-    fn create_body_has_no_env_or_budget() {
-        let body = create_body(&spec());
-        let object = body.as_object();
-        assert!(object.is_some_and(|o| !o.contains_key("env") && !o.contains_key("budget")));
-    }
-
-    #[test]
-    fn segment_is_encoded() {
-        assert_eq!(encode_segment("a/b?c"), "a%2Fb%3Fc");
-    }
-}
+mod tests;
