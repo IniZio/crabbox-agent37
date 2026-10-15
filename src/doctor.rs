@@ -6,8 +6,8 @@ use serde_json::Value;
 
 use crate::agent37::{Agent37, ApiError, Instance};
 
-/// Name of the throwaway VM created when no listed instance proves VM entitlement.
-const PROBE_NAME: &str = "crabbox-agent37-doctor-probe";
+/// Note shown when no listed instance proves VM entitlement.
+const VM_UNKNOWN: &str = "VM availability unknown until first acquire; a 403 tier_limit on acquire means the workspace is not funded for VM instances";
 
 /// One check's outcome: `Ok` is a pass message, `Err` a failure message.
 type Check = Result<String, String>;
@@ -17,7 +17,7 @@ pub fn run(config: &Value, api: &dyn Agent37, diag: &mut dyn Write) -> Result<St
     let (workspace, instances) = check_workspace(api);
     let (vm, key) = instances.as_ref().map_or_else(
         || (skipped(), skipped()),
-        |list| (check_vm(api, list), check_ssh_key(config, api)),
+        |list| (Ok(check_vm(list)), check_ssh_key(config, api)),
     );
     let checks = [workspace, vm, key];
     let lines: Vec<&str> = checks
@@ -53,32 +53,19 @@ fn check_workspace(api: &dyn Agent37) -> (Check, Option<Vec<Instance>>) {
             Err("workspace unreachable: API key rejected (invalid_api_key)".to_owned()),
             None,
         ),
-        Err(err) => (Err(format!("workspace unreachable: {err}")), None),
+        Err(err) => (
+            Err(format!("workspace unreachable: {}", err.operator_message())),
+            None,
+        ),
     }
 }
 
-/// Confirms the workspace can run VMs, probing with a create only when listing cannot tell.
-fn check_vm(api: &dyn Agent37, instances: &[Instance]) -> Check {
-    let available = "VM instances available".to_owned();
+/// Reports VM entitlement from the listing alone; doctor never creates or deletes.
+fn check_vm(instances: &[Instance]) -> String {
     if instances.iter().any(|i| i.kind.as_deref() == Some("vm")) {
-        return Ok(available);
-    }
-    match api.create_probe_vm(PROBE_NAME) {
-        Ok(probe) => api
-            .delete_instance(&probe.id)
-            .map(|()| available)
-            .map_err(|err| {
-                format!(
-                    "probe VM {} was created but could not be deleted ({err}); remove it manually",
-                    probe.id
-                )
-            }),
-        Err(ApiError::Http {
-            status: 403,
-            code: Some(code),
-            ..
-        }) if code == "tier_limit" => Err("workspace not funded for VM instances".to_owned()),
-        Err(err) => Err(format!("VM availability unknown: {err}")),
+        "VM instances available".to_owned()
+    } else {
+        VM_UNKNOWN.to_owned()
     }
 }
 
@@ -102,7 +89,7 @@ fn check_ssh_key(config: &Value, api: &dyn Agent37) -> Check {
         key_identity(&text).ok_or_else(|| format!("{path} is not an OpenSSH public key"))?;
     let keys = api
         .list_ssh_keys()
-        .map_err(|err| format!("SSH key check failed: {err}"))?;
+        .map_err(|err| format!("SSH key check failed: {}", err.operator_message()))?;
     if keys
         .iter()
         .any(|k| key_identity(&k.public_key) == Some((kind, blob)))
@@ -120,23 +107,19 @@ fn check_ssh_key(config: &Value, api: &dyn Agent37) -> Check {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "tests fail loudly on setup errors")]
 mod tests {
-    use std::cell::{Cell, RefCell};
+    use std::cell::RefCell;
 
     use serde_json::json;
 
     use super::*;
     use crate::agent37::SshKey;
 
-    /// Scripted API; counts creates and records deletes.
+    /// Scripted API; records deletes.
     struct Fake {
         /// Result of listing instances.
         instances: Result<Vec<Instance>, ApiError>,
         /// Registered keys.
         keys: Vec<SshKey>,
-        /// Result of the probe create.
-        create: Result<Instance, ApiError>,
-        /// Number of probe creates.
-        creates: Cell<u32>,
         /// Ids passed to delete.
         deleted: RefCell<Vec<String>>,
     }
@@ -147,10 +130,6 @@ mod tests {
         }
         fn list_ssh_keys(&self) -> Result<Vec<SshKey>, ApiError> {
             Ok(self.keys.clone())
-        }
-        fn create_probe_vm(&self, _name: &str) -> Result<Instance, ApiError> {
-            self.creates.set(self.creates.get() + 1);
-            self.create.clone()
         }
         fn delete_instance(&self, id: &str) -> Result<(), ApiError> {
             self.deleted.borrow_mut().push(id.to_owned());
@@ -185,8 +164,6 @@ mod tests {
                 id: "k".into(),
                 public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIABCDEFGH other-comment".into(),
             }],
-            create: Ok(inst("probe", "vm")),
-            creates: Cell::new(0),
             deleted: RefCell::new(vec![]),
         }
     }
@@ -204,33 +181,30 @@ mod tests {
     }
 
     #[test]
-    fn all_pass_and_existing_vm_skips_probe() {
+    fn all_pass_with_existing_vm() {
         let api = fake();
         let msg = go(&api).unwrap();
         assert_eq!(
             msg,
             "agent37 ready: workspace reachable (1 instances); VM instances available; SSH key registered (ssh-ed25519 ...ABCDEFGH)"
         );
-        assert_eq!(api.creates.get(), 0);
     }
 
     #[test]
-    fn tier_limit_means_not_funded() {
+    fn no_vm_instance_gives_the_note_and_ok_when_other_checks_pass() {
         let mut api = fake();
         api.instances = Ok(vec![inst("a", "default")]);
-        api.create = Err(http(403, Some("tier_limit")));
-        let msg = go(&api).unwrap_err();
-        assert!(msg.starts_with("agent37 doctor failed: "));
-        assert!(msg.contains("workspace not funded for VM instances"));
+        let msg = go(&api).unwrap();
+        assert!(msg.starts_with("agent37 ready: "));
+        assert!(msg.contains(VM_UNKNOWN));
     }
 
     #[test]
-    fn probe_success_is_deleted() {
+    fn the_fake_records_no_create_or_delete_call() {
         let mut api = fake();
         api.instances = Ok(vec![]);
         assert!(go(&api).is_ok());
-        assert_eq!(api.creates.get(), 1);
-        assert_eq!(*api.deleted.borrow(), ["probe"]);
+        assert!(api.deleted.borrow().is_empty());
     }
 
     #[test]
@@ -241,7 +215,6 @@ mod tests {
         assert!(msg.contains(
             "workspace unreachable: API key rejected (invalid_api_key); skipped; skipped"
         ));
-        assert_eq!(api.creates.get(), 0);
     }
 
     #[test]

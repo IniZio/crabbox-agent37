@@ -26,9 +26,10 @@ Do not put the key in crabbox config. One team key is held on the controller hos
 
 ## Operations
 
-- `doctor` checks that the workspace is reachable, that VMs are available, and that the SSH key is registered.
-  - agent37 answers 403 `tier_limit` when the workspace cannot run VMs. Doctor reports this as "workspace not funded for VM instances".
-  - agent37 has no read-only way to check VM availability. When the workspace has no VM yet, doctor creates a small probe VM named `crabbox-agent37-doctor-probe` and deletes it at once. This costs a few seconds of VM time.
+- `doctor` checks that the workspace is reachable, that VMs are available, and that the SSH key is registered. It is read-only. It only lists instances and SSH keys. It never creates, changes or deletes anything.
+  - If the workspace already has a `type: vm` instance, doctor reports "VM instances available".
+  - Otherwise doctor reports that VM availability is unknown until the first acquire. This is a note, not a failure.
+  - agent37 answers a VM create on an unfunded workspace with 403 `tier_limit`. The adapter reports this as "workspace not funded for VM instances".
 
 All other operations return an error for now.
 

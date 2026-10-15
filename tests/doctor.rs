@@ -138,6 +138,15 @@ fn seen(fake: &FakeAgent37) -> Vec<String> {
         .collect()
 }
 
+/// Doctor must never create or delete anything.
+fn assert_sent_no_writes(fake: &FakeAgent37) {
+    let writes: Vec<String> = seen(fake)
+        .into_iter()
+        .filter(|r| r.starts_with("POST ") || r.starts_with("DELETE "))
+        .collect();
+    assert!(writes.is_empty(), "doctor sent writes: {writes:?}");
+}
+
 #[test]
 fn healthy_workspace_reports_every_check_without_creating_anything() {
     let setup = Setup::new();
@@ -158,11 +167,13 @@ fn healthy_workspace_reports_every_check_without_creating_anything() {
     ] {
         assert!(message.contains(part), "missing {part:?} in {message}");
     }
-    assert!(!seen(&setup.fake).iter().any(|r| r.starts_with("POST")));
+    assert_sent_no_writes(&setup.fake);
 }
 
+const VM_NOTE: &str = "VM availability unknown until first acquire; a 403 tier_limit on acquire means the workspace is not funded for VM instances";
+
 #[test]
-fn missing_vm_is_probed_with_create_then_delete() {
+fn no_vm_instance_passes_with_unknown_availability_note() {
     let setup = Setup::new();
     setup.fake.add_instance("inst_a", "box", "container");
     let out = run(
@@ -171,26 +182,13 @@ fn missing_vm_is_probed_with_create_then_delete() {
         &[KEY],
     );
     assert_eq!(out.code, 0, "{}", out.text());
-    assert!(out.text().contains("VM instances available"));
-    let requests = setup.fake.requests();
-    let post = requests.iter().find(|r| r.method == "POST").unwrap();
-    assert_eq!(post.path, "/v1/instances");
-    let body: Value = serde_json::from_str(&post.body).unwrap();
-    assert_eq!(body["type"], "vm");
-    assert_eq!(body["name"], "crabbox-agent37-doctor-probe");
-    assert!(
-        body.get("env").is_none() && body.get("budget").is_none(),
-        "{body}"
-    );
-    let delete = requests.iter().find(|r| r.method == "DELETE").unwrap();
-    assert_eq!(delete.path, "/v1/instances/inst_1");
-    let post_at = requests.iter().position(|r| r.method == "POST").unwrap();
-    let delete_at = requests.iter().position(|r| r.method == "DELETE").unwrap();
-    assert!(post_at < delete_at);
+    assert!(out.text().contains(VM_NOTE), "{}", out.text());
+    assert!(!out.text().contains("VM instances available"));
+    assert_sent_no_writes(&setup.fake);
 }
 
 #[test]
-fn tier_limited_workspace_fails_with_funding_hint() {
+fn tier_limited_fake_does_not_affect_doctor() {
     let setup = Setup::new();
     setup.fake.set_vm_tier_limited(true);
     let out = run(
@@ -198,12 +196,22 @@ fn tier_limited_workspace_fails_with_funding_hint() {
         None,
         &[KEY],
     );
-    assert_eq!(out.code, 1);
-    assert!(
-        out.text().contains("workspace not funded for VM instances"),
-        "{}",
-        out.text()
+    assert_eq!(out.code, 0, "{}", out.text());
+    assert!(out.text().contains(VM_NOTE), "{}", out.text());
+    assert_sent_no_writes(&setup.fake);
+}
+
+#[test]
+fn doctor_sends_no_post_or_delete() {
+    let setup = Setup::new();
+    let out = run(
+        &doctor(&setup.config_with_key_file(KEY, 0o600)),
+        None,
+        &[KEY],
     );
+    assert_eq!(out.code, 0, "{}", out.text());
+    assert!(!setup.fake.requests().is_empty());
+    assert_sent_no_writes(&setup.fake);
 }
 
 #[test]
@@ -221,6 +229,7 @@ fn unregistered_ssh_key_fails() {
         "{}",
         out.text()
     );
+    assert_sent_no_writes(&setup.fake);
 }
 
 #[test]
@@ -234,6 +243,7 @@ fn wrong_api_key_is_rejected() {
     );
     assert_eq!(out.code, 1);
     assert!(out.text().contains("API key rejected"), "{}", out.text());
+    assert_sent_no_writes(&setup.fake);
 }
 
 #[test]
@@ -247,6 +257,7 @@ fn key_file_with_wide_mode_is_refused_before_any_request() {
     assert_eq!(out.code, 1);
     assert!(out.text().contains("0600"), "{}", out.text());
     assert!(setup.fake.requests().is_empty());
+    assert_sent_no_writes(&setup.fake);
 }
 
 #[test]
@@ -255,6 +266,7 @@ fn key_from_environment_works() {
     setup.fake.add_instance("inst_a", "dev", "vm");
     let out = run(&doctor(&setup.config()), Some(KEY), &[KEY]);
     assert_eq!(out.code, 0, "{}", out.text());
+    assert_sent_no_writes(&setup.fake);
 }
 
 #[test]
@@ -283,6 +295,7 @@ fn bearer_header_carries_key_and_paths_never_do() {
     assert_eq!(out.code, 0, "{}", out.text());
     let requests = setup.fake.requests();
     assert!(!requests.is_empty());
+    assert_sent_no_writes(&setup.fake);
     for request in &requests {
         assert_eq!(
             request.header("authorization"),
