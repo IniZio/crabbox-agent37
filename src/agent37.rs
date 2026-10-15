@@ -34,8 +34,8 @@ impl Instance {
 pub struct SshKey {
     /// Key id.
     pub id: String,
-    /// One OpenSSH public key line.
-    pub public_key: String,
+    /// OpenSSH SHA256 fingerprint, `SHA256:<base64 without padding>`.
+    pub fingerprint: String,
 }
 
 /// What `create_instance` asks agent37 for. The request body is built only from these fields.
