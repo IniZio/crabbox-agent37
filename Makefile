@@ -62,7 +62,7 @@ build:
 	cargo build --release --locked
 
 deploy:
-	@echo "deploy: release binaries are not published yet"
+	@echo "deploy: releases are published by pushing a v* tag (CI release workflow)"
 
 # Single source of the pins for CI's install-action step.
 .PHONY: print-tool-versions
