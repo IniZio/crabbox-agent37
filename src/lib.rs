@@ -7,6 +7,7 @@ pub mod agent37;
 pub mod api;
 pub mod doctor;
 pub mod key;
+pub mod lease;
 pub mod protocol;
 
 use std::io::Write;
@@ -22,8 +23,8 @@ pub struct Outcome {
 /// Handles one request. `env_key` is the value of `AGENT37_API_KEY`, if set.
 pub fn run(input: &[u8], env_key: Option<String>, diag: &mut dyn Write) -> Outcome {
     match handle(input, env_key, diag) {
-        Ok(message) => Outcome {
-            stdout: protocol::message_response(&message),
+        Ok(stdout) => Outcome {
+            stdout,
             exit_code: 0,
         },
         Err(error) => Outcome {
@@ -33,15 +34,45 @@ pub fn run(input: &[u8], env_key: Option<String>, diag: &mut dyn Write) -> Outco
     }
 }
 
-/// Dispatches a parsed request to its operation.
+/// A lease operation: acquire or resolve.
+type LeaseOp = fn(
+    &protocol::Request,
+    &dyn agent37::Agent37,
+    &std::path::Path,
+    &mut dyn Write,
+) -> Result<protocol::Lease, String>;
+
+/// Builds the HTTP client from the request config and the environment key.
+fn client(
+    request: &protocol::Request,
+    env_key: Option<String>,
+) -> Result<api::HttpAgent37, String> {
+    let key = key::resolve(&request.config, env_key)?;
+    Ok(api::HttpAgent37::new(api::base_url(&request.config), key))
+}
+
+/// Runs a lease operation and renders its lease response.
+fn lease_op(
+    request: &protocol::Request,
+    env_key: Option<String>,
+    diag: &mut dyn Write,
+    op: LeaseOp,
+) -> Result<String, String> {
+    let client = client(request, env_key)?;
+    let exe = std::env::current_exe().map_err(|e| format!("cannot locate adapter binary: {e}"))?;
+    op(request, &client, &exe, diag).map(|lease| protocol::lease_response(&lease))
+}
+
+/// Dispatches a parsed request to its operation; returns the stdout JSON.
 fn handle(input: &[u8], env_key: Option<String>, diag: &mut dyn Write) -> Result<String, String> {
     let request = protocol::parse_request(input)?;
     match request.operation {
         protocol::Operation::Doctor => {
-            let key = key::resolve(&request.config, env_key)?;
-            let client = api::HttpAgent37::new(api::base_url(&request.config), key);
-            doctor::run(&request.config, &client, diag)
+            let client = client(&request, env_key)?;
+            doctor::run(&request.config, &client, diag).map(|m| protocol::message_response(&m))
         }
+        protocol::Operation::Acquire => lease_op(&request, env_key, diag, lease::acquire),
+        protocol::Operation::Resolve => lease_op(&request, env_key, diag, lease::resolve),
         other => Err(format!(
             "operation {} is not supported by this adapter version",
             other.as_str()
