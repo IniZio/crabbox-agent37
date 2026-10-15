@@ -407,3 +407,63 @@ fn unfunded_workspace_error_names_the_cause() {
         out.text()
     );
 }
+
+/// Exec requests whose command starts with `prefix`.
+fn exec_count(fake: &FakeAgent37, prefix: &str) -> usize {
+    fake.requests()
+        .iter()
+        .filter(|r| r.path.ends_with("/exec"))
+        .filter(|r| {
+            let body: Value = serde_json::from_str(&r.body).unwrap();
+            body["command"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with(prefix)
+        })
+        .count()
+}
+
+#[test]
+fn acquire_with_all_tools_present_probes_once() {
+    let fake = FakeAgent37::start_with_key(KEY);
+    run_env(&acquire(&fake)).lease();
+    assert_eq!(count(&fake, "POST /v1/instances/vm00000001/exec"), 2);
+    assert_eq!(exec_count(&fake, ": crabbox-tools-probe; "), 1);
+    assert_eq!(exec_count(&fake, ": crabbox-tools-install; "), 0);
+}
+
+#[test]
+fn acquire_installs_a_missing_tool() {
+    let fake = FakeAgent37::start_with_key(KEY);
+    fake.set_missing_tools(&["rsync"]);
+    run_env(&acquire(&fake)).lease();
+    assert_eq!(exec_count(&fake, ": crabbox-tools-install; "), 1);
+    assert!(fake.missing_tools().is_empty());
+}
+
+#[test]
+fn failed_tool_install_fails_acquire_and_deletes_the_instance() {
+    let fake = FakeAgent37::start_with_key(KEY);
+    fake.set_missing_tools(&["rsync"]);
+    fake.set_tool_install_fails(true);
+    let out = run_env(&acquire(&fake));
+    assert_eq!(out.code, 1, "{}", out.raw);
+    assert!(out.text().contains("rsync"), "{}", out.text());
+    assert_eq!(
+        count(&fake, "DELETE /v1/instances/"),
+        1,
+        "{:?}",
+        seen(&fake)
+    );
+    assert!(fake.instances().is_empty());
+}
+
+#[test]
+fn missing_apt_get_fails_acquire_naming_the_tool() {
+    let fake = FakeAgent37::start_with_key(KEY);
+    fake.set_missing_tools(&["rsync"]);
+    fake.set_no_apt(true);
+    let out = run_env(&acquire(&fake));
+    assert_eq!(out.code, 1, "{}", out.raw);
+    assert!(out.text().contains("rsync"), "{}", out.text());
+}
