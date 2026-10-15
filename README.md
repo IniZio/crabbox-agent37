@@ -55,7 +55,7 @@ The keys under `config` are described in the Config table below.
 agent37 SSH keys belong to the whole workspace, at most 20 per workspace. A registered key gives root on every instance in the workspace. Use one team key pair for the workspace.
 
 1. Create the pair once: `ssh-keygen -t ed25519 -f ~/.ssh/agent37_team`.
-2. Register `agent37_team.pub` once, in the agent37 dashboard or with `agent37 ssh setup`. It can also be sent to `POST /v1/ssh-keys`.
+2. Register `agent37_team.pub` once, in the agent37 dashboard or with `agent37 ssh setup`.
 3. Set `config.sshKey` to the private key path.
 4. Run `crabbox doctor`. The adapter's `doctor` reports whether the key is registered.
 
