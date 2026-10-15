@@ -41,6 +41,17 @@ impl RecordedRequest {
     }
 }
 
+/// How the simulated tool install behaves when started.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InstallMode {
+    /// Install finishes and the tools are present.
+    Succeeds,
+    /// A finishing install leaves the tools missing.
+    Fails,
+    /// The install command finds no `apt-get`.
+    NoApt,
+}
+
 /// Mutable server state shared with the accept thread.
 struct State {
     /// Bearer token the fake accepts.
@@ -69,6 +80,16 @@ struct State {
     exec_fails_after_start: u32,
     /// Injected exec failures still pending per instance id.
     exec_failures_left: HashMap<String, u32>,
+    /// Tools absent from the image; persists across stop/start.
+    missing_tools: Vec<String>,
+    /// Install progress reported by the probe: none|running|ok|failed.
+    tool_install: String,
+    /// How the install behaves when started.
+    install_mode: InstallMode,
+    /// Probes while running before the install finishes.
+    install_probes: u32,
+    /// Probes still to answer before the running install finishes.
+    install_probes_left: u32,
 }
 
 /// Handle to a running fake; the server thread lives until the test process exits.
@@ -98,6 +119,11 @@ impl FakeAgent37 {
             key_generations: HashMap::new(),
             exec_fails_after_start: 0,
             exec_failures_left: HashMap::new(),
+            missing_tools: Vec::new(),
+            tool_install: "none".to_owned(),
+            install_mode: InstallMode::Succeeds,
+            install_probes: 1,
+            install_probes_left: 0,
         }));
         let shared = Arc::clone(&state);
         thread::spawn(move || {
@@ -175,6 +201,46 @@ impl FakeAgent37 {
     #[allow(dead_code, reason = "each test binary uses a different subset")]
     pub(crate) fn set_exec_fails_after_start(&self, n: u32) {
         self.lock().exec_fails_after_start = n;
+    }
+
+    /// Marks `tools` as absent from the image.
+    #[allow(dead_code, reason = "each test binary uses a different subset")]
+    pub(crate) fn set_missing_tools(&self, tools: &[&str]) {
+        self.lock().missing_tools = tools.iter().map(|t| (*t).to_owned()).collect();
+    }
+
+    /// Makes a finishing tool install fail and leave the tools missing.
+    #[allow(dead_code, reason = "each test binary uses a different subset")]
+    pub(crate) fn set_tool_install_fails(&self, fails: bool) {
+        self.set_install_mode(fails, InstallMode::Fails);
+    }
+
+    /// Makes the tool install command exit 3 with `no apt-get`.
+    #[allow(dead_code, reason = "each test binary uses a different subset")]
+    pub(crate) fn set_no_apt(&self, no_apt: bool) {
+        self.set_install_mode(no_apt, InstallMode::NoApt);
+    }
+
+    /// Selects `mode` when `on`; turning off the active `mode` restores success.
+    fn set_install_mode(&self, on: bool, mode: InstallMode) {
+        let mut state = self.lock();
+        if on {
+            state.install_mode = mode;
+        } else if state.install_mode == mode {
+            state.install_mode = InstallMode::Succeeds;
+        }
+    }
+
+    /// Sets how many probes a running tool install survives before finishing.
+    #[allow(dead_code, reason = "each test binary uses a different subset")]
+    pub(crate) fn set_tool_install_probes(&self, n: u32) {
+        self.lock().install_probes = n;
+    }
+
+    /// Tools still missing from the image.
+    #[allow(dead_code, reason = "each test binary uses a different subset")]
+    pub(crate) fn missing_tools(&self) -> Vec<String> {
+        self.lock().missing_tools.clone()
     }
 
     /// The host key line material exec serves for `id` right now (changes on each start).
@@ -465,10 +531,48 @@ fn exec(state: &mut State, id: &str, body: &str) -> (u16, Value) {
             200,
             json!({ "exit_code": 1, "stdout": "", "stderr": "cat: /etc/ssh/ssh_host_ed25519_key.pub: No such file or directory\n" }),
         )
+    } else if parsed["user"] == "root" && command.starts_with(": crabbox-tools-probe; ") {
+        (200, tool_probe(state))
+    } else if parsed["user"] == "root" && command.starts_with(": crabbox-tools-install; ") {
+        (200, tool_install(state))
     } else {
         (
             200,
             json!({ "exit_code": 127, "stdout": "", "stderr": "command not found" }),
         )
     }
+}
+
+/// Answers the tool probe, finishing a running install once its probes are spent.
+fn tool_probe(state: &mut State) -> Value {
+    if state.tool_install == "running" {
+        state.install_probes_left = state.install_probes_left.saturating_sub(1);
+        if state.install_probes_left == 0 {
+            if state.install_mode == InstallMode::Fails {
+                "failed".clone_into(&mut state.tool_install);
+            } else {
+                state.missing_tools.clear();
+                "ok".clone_into(&mut state.tool_install);
+            }
+        }
+    }
+    let mut stdout = format!(
+        "missing: {}\ninstall:{}\n",
+        state.missing_tools.join(" "),
+        state.tool_install
+    );
+    if state.tool_install == "failed" {
+        stdout.push_str("E: Unable to locate package rsync\n");
+    }
+    json!({ "exit_code": 0, "stdout": stdout, "stderr": "" })
+}
+
+/// Answers the detached tool install start.
+fn tool_install(state: &mut State) -> Value {
+    if state.install_mode == InstallMode::NoApt {
+        return json!({ "exit_code": 3, "stdout": "", "stderr": "no apt-get\n" });
+    }
+    "running".clone_into(&mut state.tool_install);
+    state.install_probes_left = state.install_probes;
+    json!({ "exit_code": 0, "stdout": "", "stderr": "" })
 }
