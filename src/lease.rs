@@ -1,7 +1,9 @@
 //! `acquire` and `resolve`: an idempotent agent37 VM lease for a crabbox lease.
 //!
-//! No agent37 endpoint exposes the SSH host key, so it is read over the exec API as root
-//! from `/etc/ssh/ssh_host_ed25519_key.pub`.
+//! No agent37 endpoint exposes the SSH host key, so it is read as root over exec from the
+//! `HostKey` named in the sshd config under `/.agent37/etc`. When no `.pub` exists the public
+//! key is taken from the private key file on the VM (only the public part is returned);
+//! `/etc/ssh` is the fallback.
 
 use std::io::Write;
 use std::path::Path;
@@ -10,10 +12,9 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use crate::agent37::{Agent37, ApiError, CreateSpec, Instance};
+use crate::host_key;
 use crate::protocol::{Desired, Expected, Lease, Request, Ssh};
 
-/// Command that prints the VM's ed25519 host public key.
-const HOST_KEY_COMMAND: &str = "cat /etc/ssh/ssh_host_ed25519_key.pub";
 /// Remote check that the tools crabbox needs are installed.
 const READY_CHECK: &str = "command -v bash >/dev/null && command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null";
 /// Pause between status and exec polls.
@@ -204,7 +205,7 @@ pub(crate) fn pause(deadline: Instant) -> bool {
 
 /// Host key from one exec call.
 fn read_host_key(api: &dyn Agent37, id: &str) -> Result<Result<String, String>, ApiError> {
-    let out = api.exec_as_root(id, HOST_KEY_COMMAND)?;
+    let out = api.exec_as_root(id, &host_key::production())?;
     if out.exit_code != 0 {
         return Ok(Err(format!(
             "reading host key on {id} exited {}: {}",
@@ -233,12 +234,9 @@ pub(crate) fn fetch_host_key(api: &dyn Agent37, id: &str, end: Instant) -> Resul
 }
 
 /// Appends what happened to a VM created by a failed acquire.
-fn cleanup(api: &dyn Agent37, id: &str, created: bool, keep: bool, err: String) -> String {
+fn cleanup(api: &dyn Agent37, id: &str, created: bool, err: String) -> String {
     if !created {
         return err;
-    }
-    if keep {
-        return format!("{err}; instance {id} was kept");
     }
     match api.delete_instance(id) {
         Ok(()) => format!("{err}; instance {id} deleted"),
@@ -300,7 +298,7 @@ pub fn acquire(
     });
     match ready {
         Ok(key) => build_lease(desired.clone(), &id, "ready", Some(key), proxy),
-        Err(err) => Err(cleanup(api, &id, created, request.keep, err)),
+        Err(err) => Err(cleanup(api, &id, created, err)),
     }
 }
 

@@ -69,12 +69,6 @@ fn check_vm(instances: &[Instance]) -> String {
     }
 }
 
-/// Key type and base64 blob of an OpenSSH public key line, ignoring the comment.
-fn key_identity(line: &str) -> Option<(&str, &str)> {
-    let mut fields = line.split_whitespace();
-    Some((fields.next()?, fields.next()?))
-}
-
 /// Confirms the public key beside `config.sshKey` is registered with the workspace.
 fn check_ssh_key(config: &Value, api: &dyn Agent37) -> Check {
     let private = config
@@ -85,18 +79,13 @@ fn check_ssh_key(config: &Value, api: &dyn Agent37) -> Check {
     let path = format!("{private}.pub");
     let text =
         std::fs::read_to_string(&path).map_err(|err| format!("cannot read {path}: {err}"))?;
-    let (kind, blob) =
-        key_identity(&text).ok_or_else(|| format!("{path} is not an OpenSSH public key"))?;
+    let local = crate::fingerprint::sha256(&text)
+        .ok_or_else(|| format!("{path} is not an OpenSSH public key"))?;
     let keys = api
         .list_ssh_keys()
         .map_err(|err| format!("SSH key check failed: {}", err.operator_message()))?;
-    if keys
-        .iter()
-        .any(|k| key_identity(&k.public_key) == Some((kind, blob)))
-    {
-        let skip = blob.chars().count().saturating_sub(8);
-        let tail: String = blob.chars().skip(skip).collect();
-        Ok(format!("SSH key registered ({kind} ...{tail})"))
+    if keys.iter().any(|k| k.fingerprint == local) {
+        Ok(format!("SSH key registered ({local})"))
     } else {
         Err(format!(
             "SSH public key {path} is not registered with the workspace; run: agent37 ssh setup, or POST it to /v1/ssh-keys"
@@ -113,6 +102,13 @@ mod tests {
 
     use super::*;
     use crate::agent37::{CreateSpec, ExecOutput, SshKey};
+
+    /// A real OpenSSH public key line.
+    const PUBLIC_KEY: &str =
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIwdRpo7I2deKXSGxd0wh0gdyKXzsFUSfgoBHpLeiW7V mine";
+
+    /// `ssh-keygen -lf` fingerprint of [`PUBLIC_KEY`].
+    const FINGERPRINT: &str = "SHA256:/7KRdnBqeLut7cNaD0h6P5YCJtR/VYfNlcB+DL3N6hI";
 
     /// Scripted API; records deletes.
     struct Fake {
@@ -178,7 +174,7 @@ mod tests {
             instances: Ok(vec![inst("a", "vm")]),
             keys: vec![SshKey {
                 id: "k".into(),
-                public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIABCDEFGH other-comment".into(),
+                fingerprint: FINGERPRINT.into(),
             }],
             deleted: RefCell::new(vec![]),
         }
@@ -188,11 +184,7 @@ mod tests {
     fn go(api: &Fake) -> Result<String, String> {
         let dir = tempfile::tempdir().unwrap();
         let key = dir.path().join("id");
-        std::fs::write(
-            dir.path().join("id.pub"),
-            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIABCDEFGH mine\n",
-        )
-        .unwrap();
+        std::fs::write(dir.path().join("id.pub"), format!("{PUBLIC_KEY}\n")).unwrap();
         run(&json!({"sshKey": key}), api, &mut Vec::new())
     }
 
@@ -202,7 +194,7 @@ mod tests {
         let msg = go(&api).unwrap();
         assert_eq!(
             msg,
-            "agent37 ready: workspace reachable (1 instances); VM instances available; SSH key registered (ssh-ed25519 ...ABCDEFGH)"
+            "agent37 ready: workspace reachable (1 instances); VM instances available; SSH key registered (SHA256:/7KRdnBqeLut7cNaD0h6P5YCJtR/VYfNlcB+DL3N6hI)"
         );
     }
 
@@ -239,6 +231,15 @@ mod tests {
         api.keys.clear();
         let msg = go(&api).unwrap_err();
         assert!(msg.contains("is not registered with the workspace; run: agent37 ssh setup"));
+    }
+
+    #[test]
+    fn non_openssh_public_key_file_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join("id");
+        std::fs::write(dir.path().join("id.pub"), "garbage\n").unwrap();
+        let msg = run(&json!({"sshKey": key}), &fake(), &mut Vec::new()).unwrap_err();
+        assert!(msg.contains("is not an OpenSSH public key"));
     }
 
     #[test]

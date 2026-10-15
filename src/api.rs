@@ -192,8 +192,8 @@ impl From<WireInstance> for Instance {
 struct WireKey {
     /// Key id.
     id: String,
-    /// OpenSSH public key line.
-    public_key: String,
+    /// OpenSSH SHA256 fingerprint; other fields of the item are ignored.
+    fingerprint: String,
 }
 
 /// Build the error for a non-2xx response.
@@ -246,7 +246,7 @@ impl Agent37 for HttpAgent37 {
             .into_iter()
             .map(|k| SshKey {
                 id: k.id,
-                public_key: k.public_key,
+                fingerprint: k.fingerprint,
             })
             .collect())
     }
