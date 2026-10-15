@@ -37,6 +37,12 @@ impl Agent37 for Fake {
     fn create_instance(&self, _: &CreateSpec) -> Result<Instance, ApiError> {
         Err(ApiError::Decode("unused".into()))
     }
+    fn stop_instance(&self, _: &str) -> Result<(), ApiError> {
+        Ok(())
+    }
+    fn start_instance(&self, _: &str) -> Result<(), ApiError> {
+        Ok(())
+    }
     fn exec_as_root(&self, _: &str, _: &str) -> Result<ExecOutput, ApiError> {
         Err(ApiError::Decode("unused".into()))
     }

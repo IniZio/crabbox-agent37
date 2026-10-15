@@ -73,16 +73,22 @@ fn tolerate_missing(result: Result<(), ApiError>) -> Result<(), String> {
     }
 }
 
-/// Deletes exactly the requested instance after checking it belongs to this lease.
+/// Finds the instance a request names and checks it belongs to this owner and lease.
+///
+/// Returns `None` when the instance no longer exists. Changes nothing remotely.
 ///
 /// # Errors
-/// Returns a message, without deleting, when the request does not match the instance.
-pub fn release(request: &Request, api: &dyn Agent37) -> Result<(), String> {
-    let owner = settings(&request.config)?.owner;
+/// Returns a message when the request is incomplete or does not match the instance.
+pub(crate) fn lease_instance(
+    request: &Request,
+    api: &dyn Agent37,
+    owner: &str,
+    op: &str,
+) -> Result<Option<Instance>, String> {
     let lease = request.lease.as_ref();
     let id = lease
         .and_then(|l| l.cloud_id.as_deref())
-        .ok_or("release requires lease.cloudId")?;
+        .ok_or_else(|| format!("{op} requires lease.cloudId"))?;
     let expected = request.expected.as_ref();
     if let Some(want) = expected.and_then(|e| e.cloud_id.as_deref()) {
         if want != id {
@@ -93,14 +99,20 @@ pub fn release(request: &Request, api: &dyn Agent37) -> Result<(), String> {
     }
     let instance = match api.get_instance(id) {
         Ok(instance) => instance,
-        Err(ApiError::Http { status: 404, .. }) => return Ok(()),
+        Err(ApiError::Http { status: 404, .. }) => return Ok(None),
         Err(e) => return Err(e.operator_message()),
     };
-    if !owned(&instance, &owner) {
+    if instance.id != id {
+        return Err(format!("instance {id} resolved to {}", instance.id));
+    }
+    if !owned(&instance, owner) {
         return Err(format!("instance {id} belongs to another owner"));
     }
+    if instance.kind.as_deref() != Some("vm") {
+        return Err(format!("instance {id} is not a VM"));
+    }
     if let Some(name) = lease.and_then(|l| l.name.as_deref()) {
-        if instance.name.as_deref() != Some(format!("{}{name}", prefix(&owner)).as_str()) {
+        if instance.name.as_deref() != Some(format!("{}{name}", prefix(owner)).as_str()) {
             return Err(format!("instance {id} does not match lease name {name}"));
         }
     }
@@ -114,7 +126,19 @@ pub fn release(request: &Request, api: &dyn Agent37) -> Result<(), String> {
             return Err(format!("instance {id} does not match lease id {want}"));
         }
     }
-    tolerate_missing(api.delete_instance(id))
+    Ok(Some(instance))
+}
+
+/// Deletes exactly the requested instance after checking it belongs to this lease.
+///
+/// # Errors
+/// Returns a message, without deleting, when the request does not match the instance.
+pub fn release(request: &Request, api: &dyn Agent37) -> Result<(), String> {
+    let owner = settings(&request.config)?.owner;
+    match lease_instance(request, api, &owner, "release")? {
+        Some(instance) => tolerate_missing(api.delete_instance(&instance.id)),
+        None => Ok(()),
+    }
 }
 
 /// Deletes owned instances that `list` cannot report (no lease id, slug or name).

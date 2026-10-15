@@ -63,6 +63,12 @@ struct State {
     polls: HashMap<String, u32>,
     /// Whether exec answers 502 `provisioning_failed`.
     exec_fails: bool,
+    /// Host-key generation per instance id; `start` bumps it.
+    key_generations: HashMap<String, u32>,
+    /// Exec failures to inject after each `start`.
+    exec_fails_after_start: u32,
+    /// Injected exec failures still pending per instance id.
+    exec_failures_left: HashMap<String, u32>,
 }
 
 /// Handle to a running fake; the server thread lives until the test process exits.
@@ -89,6 +95,9 @@ impl FakeAgent37 {
             polls_until_running: None,
             polls: HashMap::new(),
             exec_fails: false,
+            key_generations: HashMap::new(),
+            exec_fails_after_start: 0,
+            exec_failures_left: HashMap::new(),
         }));
         let shared = Arc::clone(&state);
         thread::spawn(move || {
@@ -162,6 +171,19 @@ impl FakeAgent37 {
         self.lock().exec_fails = fails;
     }
 
+    /// Makes the first `n` exec calls after each `start` answer 502 (ssh not ready yet).
+    #[allow(dead_code, reason = "each test binary uses a different subset")]
+    pub(crate) fn set_exec_fails_after_start(&self, n: u32) {
+        self.lock().exec_fails_after_start = n;
+    }
+
+    /// The host key line material exec serves for `id` right now (changes on each start).
+    #[allow(dead_code, reason = "each test binary uses a different subset")]
+    pub(crate) fn current_host_key(&self, id: &str) -> String {
+        let generation = self.lock().key_generations.get(id).copied().unwrap_or(0);
+        key_for_generation(id, generation)
+    }
+
     /// The instance object with `id`, if present.
     #[allow(dead_code, reason = "each test binary uses a different subset")]
     pub(crate) fn instance(&self, id: &str) -> Option<Value> {
@@ -213,6 +235,15 @@ pub(crate) fn host_key_line(id: &str) -> String {
 #[allow(dead_code, reason = "each test binary uses a different subset")]
 pub(crate) fn expected_host_key(id: &str) -> String {
     format!("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI{id}")
+}
+
+/// Key material for `id` at host-key `generation`; generation 0 is `expected_host_key`.
+fn key_for_generation(id: &str, generation: u32) -> String {
+    if generation == 0 {
+        expected_host_key(id)
+    } else {
+        format!("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI{id}g{generation}")
+    }
 }
 
 /// An instance API object.
@@ -308,7 +339,19 @@ fn route(request: &RecordedRequest, state: &Mutex<State>) -> (u16, Value) {
             let id = path
                 .trim_start_matches("/v1/instances/")
                 .trim_end_matches("/exec");
-            exec(&state, id, &request.body)
+            exec(&mut state, id, &request.body)
+        }
+        ("POST", _) if path.starts_with("/v1/instances/") && path.ends_with("/stop") => {
+            let id = path
+                .trim_start_matches("/v1/instances/")
+                .trim_end_matches("/stop");
+            set_power(&mut state, id, false)
+        }
+        ("POST", _) if path.starts_with("/v1/instances/") && path.ends_with("/start") => {
+            let id = path
+                .trim_start_matches("/v1/instances/")
+                .trim_end_matches("/start");
+            set_power(&mut state, id, true)
         }
         ("DELETE", _) if path.starts_with("/v1/instances/") => {
             let id = path.trim_start_matches("/v1/instances/");
@@ -371,28 +414,48 @@ fn get_instance(state: &mut State, id: &str) -> (u16, Value) {
     (200, instance.clone())
 }
 
-/// Handles `POST /v1/instances/{id}/exec`.
-fn exec(state: &State, id: &str, body: &str) -> (u16, Value) {
-    let Some(instance) = state.instances.iter().find(|i| i["id"] == id) else {
+/// Handles `POST /v1/instances/{id}/stop|start`; a start is a cold boot with a fresh host key.
+fn set_power(state: &mut State, id: &str, start: bool) -> (u16, Value) {
+    let Some(instance) = state.instances.iter_mut().find(|i| i["id"] == id) else {
         return (404, nested_error("not_found", "Instance not found."));
     };
-    if state.exec_fails {
+    let status = if start { "running" } else { "stopped" };
+    instance["status"] = json!(status);
+    if start {
+        *state.key_generations.entry(id.to_owned()).or_insert(0) += 1;
+        let left = state.exec_fails_after_start;
+        state.exec_failures_left.insert(id.to_owned(), left);
+    }
+    (200, json!({ "status": status }))
+}
+
+/// Handles `POST /v1/instances/{id}/exec`.
+fn exec(state: &mut State, id: &str, body: &str) -> (u16, Value) {
+    if !state.instances.iter().any(|i| i["id"] == id) {
+        return (404, nested_error("not_found", "Instance not found."));
+    }
+    let left = state.exec_failures_left.entry(id.to_owned()).or_insert(0);
+    let booting = *left > 0;
+    *left = left.saturating_sub(1);
+    if state.exec_fails || booting {
         return (
             502,
             nested_error("provisioning_failed", "VM provisioning failed."),
         );
     }
+    let instance = state.instances.iter().find(|i| i["id"] == id).unwrap();
     if instance["status"] != "running" {
         return (
             400,
             nested_error("invalid_request", "Instance is not running."),
         );
     }
+    let generation = state.key_generations.get(id).copied().unwrap_or(0);
     let parsed: Value = serde_json::from_str(body).unwrap_or(Value::Null);
     if parsed["command"] == "cat /etc/ssh/ssh_host_ed25519_key.pub" && parsed["user"] == "root" {
         (
             200,
-            json!({ "exit_code": 0, "stdout": host_key_line(id), "stderr": "" }),
+            json!({ "exit_code": 0, "stdout": format!("{} root@{id}\n", key_for_generation(id, generation)), "stderr": "" }),
         )
     } else {
         (

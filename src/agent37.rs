@@ -133,6 +133,10 @@ pub trait Agent37 {
     fn create_instance(&self, spec: &CreateSpec) -> Result<Instance, ApiError>;
     /// `POST /v1/instances/{id}/exec`, run as root.
     fn exec_as_root(&self, id: &str, command: &str) -> Result<ExecOutput, ApiError>;
+    /// `POST /v1/instances/{id}/stop`.
+    fn stop_instance(&self, id: &str) -> Result<(), ApiError>;
+    /// `POST /v1/instances/{id}/start`.
+    fn start_instance(&self, id: &str) -> Result<(), ApiError>;
 }
 
 #[cfg(test)]

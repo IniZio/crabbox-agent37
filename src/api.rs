@@ -270,6 +270,16 @@ impl Agent37 for HttpAgent37 {
         Ok(wire.into())
     }
 
+    fn stop_instance(&self, id: &str) -> Result<(), ApiError> {
+        let path = format!("/v1/instances/{}/stop", encode_segment(id));
+        self.post::<Value>(&path, &json!({})).map(|_| ())
+    }
+
+    fn start_instance(&self, id: &str) -> Result<(), ApiError> {
+        let path = format!("/v1/instances/{}/start", encode_segment(id));
+        self.post::<Value>(&path, &json!({})).map(|_| ())
+    }
+
     fn exec_as_root(&self, id: &str, command: &str) -> Result<ExecOutput, ApiError> {
         let path = format!("/v1/instances/{}/exec", encode_segment(id));
         let wire: WireExec = self.post(&path, &json!({"command": command, "user": "root"}))?;

@@ -141,6 +141,12 @@ mod tests {
         fn create_instance(&self, _spec: &CreateSpec) -> Result<Instance, ApiError> {
             Err(ApiError::Unreachable("not used by doctor".into()))
         }
+        fn stop_instance(&self, _id: &str) -> Result<(), ApiError> {
+            Ok(())
+        }
+        fn start_instance(&self, _id: &str) -> Result<(), ApiError> {
+            Ok(())
+        }
         fn exec_as_root(&self, _id: &str, _command: &str) -> Result<ExecOutput, ApiError> {
             Err(ApiError::Unreachable("not used by doctor".into()))
         }

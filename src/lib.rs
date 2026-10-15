@@ -9,6 +9,7 @@ pub mod doctor;
 pub mod inventory;
 pub mod key;
 pub mod lease;
+pub mod power;
 pub mod protocol;
 pub mod tunnel;
 
@@ -36,7 +37,7 @@ pub fn run(input: &[u8], env_key: Option<String>, diag: &mut dyn Write) -> Outco
     }
 }
 
-/// A lease operation: acquire or resolve.
+/// A lease operation: acquire, resolve or resume.
 type LeaseOp = fn(
     &protocol::Request,
     &dyn agent37::Agent37,
@@ -86,5 +87,8 @@ fn handle(input: &[u8], env_key: Option<String>, diag: &mut dyn Write) -> Result
         protocol::Operation::Touch => Ok(protocol::ok_response()),
         protocol::Operation::Cleanup => inventory::cleanup(&request, &client(&request, env_key)?)
             .map(|m| protocol::message_response(&m)),
+        protocol::Operation::Pause => power::pause(&request, &client(&request, env_key)?, diag)
+            .map(|m| protocol::message_response(&m)),
+        protocol::Operation::Resume => lease_op(&request, env_key, diag, power::resume),
     }
 }

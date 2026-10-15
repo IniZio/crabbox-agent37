@@ -23,6 +23,10 @@ pub enum Operation {
     Touch,
     /// Remove stale resources.
     Cleanup,
+    /// Stop a lease's machine, keeping its disk.
+    Pause,
+    /// Start a paused lease's machine.
+    Resume,
 }
 
 impl Operation {
@@ -37,6 +41,8 @@ impl Operation {
             Self::Release => "release",
             Self::Touch => "touch",
             Self::Cleanup => "cleanup",
+            Self::Pause => "pause",
+            Self::Resume => "resume",
         }
     }
 
@@ -50,6 +56,8 @@ impl Operation {
             Self::Release,
             Self::Touch,
             Self::Cleanup,
+            Self::Pause,
+            Self::Resume,
         ]
         .into_iter()
         .find(|op| op.as_str() == name)

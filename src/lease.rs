@@ -26,9 +26,9 @@ pub(crate) struct Settings {
     /// `us` or `eu`.
     region: String,
     /// Seconds to wait for a running VM with a readable host key.
-    timeout: u64,
+    pub(crate) timeout: u64,
     /// Key file the tunnel reads the API key from, as configured.
-    key_file: Option<String>,
+    pub(crate) key_file: Option<String>,
 }
 
 /// Reads and validates `owner`, `region`, `readyTimeoutSeconds` and `keyFile`.
@@ -97,7 +97,7 @@ fn quote(p: &str) -> String {
 }
 
 /// ssh `ProxyCommand` that tunnels through the adapter.
-fn proxy_command(exe: &Path, key_file: Option<&str>) -> Result<String, String> {
+pub(crate) fn proxy_command(exe: &Path, key_file: Option<&str>) -> Result<String, String> {
     let exe = exe.to_str().ok_or("adapter path is not valid UTF-8")?;
     let Some(key_file) = key_file else {
         return Ok(format!("{} tunnel %h", quote(exe)));
@@ -119,7 +119,7 @@ fn proxy_command(exe: &Path, key_file: Option<&str>) -> Result<String, String> {
 }
 
 /// Status string of an instance.
-fn status_of(instance: &Instance) -> &str {
+pub(crate) fn status_of(instance: &Instance) -> &str {
     instance.status.as_deref().unwrap_or("unknown")
 }
 
@@ -179,7 +179,7 @@ fn wait_running(
         match status_of(&instance) {
             "running" => return Ok(()),
             "failed" => return Err(format!("instance {} failed", instance.id)),
-            "stopped" => return Err(format!("instance {} is stopped", instance.id)),
+            "stopped" => return Err(crate::power::stopped(&instance.id)),
             _ => {}
         }
         if !pause(deadline) {
@@ -196,7 +196,7 @@ fn wait_running(
 }
 
 /// Sleeps one poll interval or the time left; false when the deadline has passed.
-fn pause(deadline: Instant) -> bool {
+pub(crate) fn pause(deadline: Instant) -> bool {
     let remaining = deadline.saturating_duration_since(Instant::now());
     std::thread::sleep(POLL.min(remaining));
     !remaining.is_zero()
@@ -220,11 +220,11 @@ fn read_host_key(api: &dyn Agent37, id: &str) -> Result<Result<String, String>, 
 }
 
 /// Host key, retrying API errors every second until the deadline.
-fn fetch_host_key(api: &dyn Agent37, id: &str, deadline: Instant) -> Result<String, String> {
+pub(crate) fn fetch_host_key(api: &dyn Agent37, id: &str, end: Instant) -> Result<String, String> {
     loop {
         match read_host_key(api, id) {
             Ok(parsed) => return parsed,
-            Err(err) if !pause(deadline) => {
+            Err(err) if !pause(end) => {
                 return Err(format!("host key unavailable: {}", err.operator_message()));
             }
             Err(_) => {}
@@ -250,7 +250,7 @@ fn cleanup(api: &dyn Agent37, id: &str, created: bool, keep: bool, err: String) 
 }
 
 /// Builds the lease for `id`.
-fn build_lease(
+pub(crate) fn build_lease(
     ident: Desired,
     id: &str,
     status: &str,
