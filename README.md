@@ -33,6 +33,14 @@ Do not put the key in crabbox config. One team key is held on the controller hos
 
 All other operations return an error for now.
 
+## tunnel
+
+`crabbox-agent37 tunnel <id>.agent37.app` is an SSH `ProxyCommand`: it bridges stdin and stdout to the instance's SSH WebSocket (`wss://<id>-22022.agent37.app/`, key in the `X-Agent37-Key` header). It needs no node or `agent37` CLI.
+
+- The key comes from `AGENT37_API_KEY`, or from the 0600 file named by `AGENT37_KEY_FILE`.
+- Any other host exits 1. A server close or network loss also exits nonzero; ssh exiting (stdin EOF) exits 0.
+- `ssh -o ProxyCommand="crabbox-agent37 tunnel %h" root@<id>.agent37.app` is the manual check against a real instance.
+
 ## Development
 
 ```

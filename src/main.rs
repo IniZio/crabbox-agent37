@@ -5,6 +5,17 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let mut stderr = std::io::stderr();
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("tunnel") {
+        let code = crabbox_agent37::tunnel::run(
+            args.get(1..).unwrap_or_default(),
+            std::env::var("AGENT37_API_KEY").ok(),
+            std::env::var("AGENT37_KEY_FILE").ok(),
+            std::env::var("AGENT37_TUNNEL_URL").ok(),
+            &mut stderr,
+        );
+        return ExitCode::from(code);
+    }
     let mut input = Vec::new();
     if let Err(error) = std::io::stdin().read_to_end(&mut input) {
         let _ = writeln!(stderr, "crabbox-agent37: reading stdin: {error}");
