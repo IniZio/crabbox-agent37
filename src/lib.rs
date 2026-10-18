@@ -55,7 +55,11 @@ fn client(
     env_key: Option<String>,
 ) -> Result<api::HttpAgent37, String> {
     let key = key::resolve(&request.config, env_key)?;
-    Ok(api::HttpAgent37::new(api::base_url(&request.config), key))
+    Ok(api::HttpAgent37::new(
+        api::base_url(&request.config),
+        key,
+        api::request_timeout(&request.config),
+    ))
 }
 
 /// Runs a lease operation and renders its lease response.
