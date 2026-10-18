@@ -26,7 +26,16 @@ fn acquire(class: &str, extra: &Value) -> (i32, Value, FakeAgent37) {
 
 /// Like [`acquire`], with `env` set on the adapter process.
 fn acquire_env(class: &str, extra: &Value, env: &[(&str, &str)]) -> (i32, Value, FakeAgent37) {
-    let fake = FakeAgent37::start_with_key(KEY);
+    acquire_on(FakeAgent37::start_with_key(KEY), class, extra, env)
+}
+
+/// Like [`acquire_env`], against a fake the caller already seeded.
+fn acquire_on(
+    fake: FakeAgent37,
+    class: &str,
+    extra: &Value,
+    env: &[(&str, &str)],
+) -> (i32, Value, FakeAgent37) {
     let mut config = json!({ "apiUrl": fake.url(), "owner": "alice" });
     for (k, v) in extra.as_object().unwrap() {
         config[k] = v.clone();
@@ -196,4 +205,18 @@ fn template_is_sent_trimmed() {
     let (code, out, fake) = acquire_env("fast", &json!({}), &env);
     assert_eq!(code, 0, "{out}");
     assert_eq!(create_body(&fake).unwrap()["template"], "agent37-go");
+}
+
+#[test]
+fn bad_disk_fails_even_when_the_instance_exists() {
+    let fake = FakeAgent37::start_with_key(KEY);
+    fake.add_instance("i1", "crabbox-alice--crabbox-blue-crab-000000000001", "vm");
+    let env = [("CRABBOX_AGENT37_DISK_GB", "21")];
+    let (code, out, fake) = acquire_on(fake, "fast", &json!({}), &env);
+    assert_eq!(code, 1, "{out}");
+    assert!(create_body(&fake).is_none());
+    assert!(
+        out.to_string().contains("CRABBOX_AGENT37_DISK_GB 21"),
+        "{out}"
+    );
 }
