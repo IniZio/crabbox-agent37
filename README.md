@@ -74,8 +74,8 @@ Do not put the key in crabbox config. One team key is held on the controller hos
 | `owner` | Required. Label for your instances: lowercase letters, digits and single dashes, at most 32 characters. Instances are named `crabbox-<owner>--<name>`. |
 | `region` | `us` (default) or `eu`. |
 | `readyTimeoutSeconds` | Seconds to wait for a running VM, and for pause and resume. Positive integer. Default 300. |
-| `template` | Template to create VMs from: a workspace template name or an `agent37-` system template. Non-empty string. Default `agent37-ubuntu`. |
-| `diskGb` | Disk size in GB, sent as `resources.disk`. Whole number from 2 up to 12, 20, 40 or 80 for the standard, fast, large or beast class. Default: not sent. |
+| `template` | Template to create VMs from: a workspace template name or an `agent37-` system template. Non-empty string. Default `agent37-ubuntu`. Env `CRABBOX_AGENT37_TEMPLATE` overrides it. |
+| `diskGb` | Disk size in GB, sent as `resources.disk`. Whole number from 2 up to 12, 20, 40 or 80 for the standard, fast, large or beast class. Default: not sent. Env `CRABBOX_AGENT37_DISK_GB` overrides it. |
 | `sshKey` | Path to the private SSH key. `<sshKey>.pub` must be registered with the workspace. |
 
 ## Rules
