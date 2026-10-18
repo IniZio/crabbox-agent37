@@ -21,6 +21,11 @@ const KEY: &str = "sk_test_fake";
 
 /// Runs `acquire` for `class` with `extra` merged into the config; returns exit code, stdout and the fake.
 fn acquire(class: &str, extra: &Value) -> (i32, Value, FakeAgent37) {
+    acquire_env(class, extra, &[])
+}
+
+/// Like [`acquire`], with `env` set on the adapter process.
+fn acquire_env(class: &str, extra: &Value, env: &[(&str, &str)]) -> (i32, Value, FakeAgent37) {
     let fake = FakeAgent37::start_with_key(KEY);
     let mut config = json!({ "apiUrl": fake.url(), "owner": "alice" });
     for (k, v) in extra.as_object().unwrap() {
@@ -40,6 +45,9 @@ fn acquire(class: &str, extra: &Value) -> (i32, Value, FakeAgent37) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_crabbox-agent37"))
         .env("AGENT37_API_KEY", KEY)
         .env_remove("AGENT37_KEY_FILE")
+        .env_remove("CRABBOX_AGENT37_TEMPLATE")
+        .env_remove("CRABBOX_AGENT37_DISK_GB")
+        .envs(env.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -120,4 +128,72 @@ fn bad_template_or_disk_type_is_rejected_without_creating() {
         assert_eq!(code, 1, "{extra}: {out}");
         assert!(create_body(&fake).is_none(), "{extra}");
     }
+}
+
+#[test]
+fn env_template_and_disk_override_config() {
+    let env = [
+        ("CRABBOX_AGENT37_TEMPLATE", "agent37-python"),
+        ("CRABBOX_AGENT37_DISK_GB", "16"),
+    ];
+    let (code, out, fake) = acquire_env(
+        "fast",
+        &json!({"template": "agent37-node", "diskGb": 8}),
+        &env,
+    );
+    assert_eq!(code, 0, "{out}");
+    let body = create_body(&fake).unwrap();
+    assert_eq!(body["template"], "agent37-python");
+    assert_eq!(body["resources"]["disk"], 16);
+}
+
+#[test]
+fn empty_env_counts_as_unset() {
+    let env = [
+        ("CRABBOX_AGENT37_TEMPLATE", ""),
+        ("CRABBOX_AGENT37_DISK_GB", ""),
+    ];
+    let (code, out, fake) = acquire_env(
+        "fast",
+        &json!({"template": "agent37-node", "diskGb": 8}),
+        &env,
+    );
+    assert_eq!(code, 0, "{out}");
+    let body = create_body(&fake).unwrap();
+    assert_eq!(body["template"], "agent37-node");
+    assert_eq!(body["resources"]["disk"], 8);
+}
+
+#[test]
+fn env_disk_errors_name_the_variable() {
+    let (code, out, fake) = acquire_env("fast", &json!({}), &[("CRABBOX_AGENT37_DISK_GB", "21")]);
+    assert_eq!(code, 1, "{out}");
+    assert!(create_body(&fake).is_none());
+    assert!(
+        out.to_string()
+            .contains("CRABBOX_AGENT37_DISK_GB 21 is outside 2-20 GB for a 4 vCPU / 8 GB VM"),
+        "{out}"
+    );
+    for bad in ["abc", "2.5", "-3"] {
+        let (code, out, fake) =
+            acquire_env("fast", &json!({}), &[("CRABBOX_AGENT37_DISK_GB", bad)]);
+        assert_eq!(code, 1, "{bad}: {out}");
+        assert!(create_body(&fake).is_none());
+        assert!(
+            out.to_string()
+                .contains("CRABBOX_AGENT37_DISK_GB must be a whole number of GB"),
+            "{out}"
+        );
+    }
+}
+
+#[test]
+fn template_is_sent_trimmed() {
+    let (code, out, fake) = acquire("fast", &json!({"template": "  agent37-node "}));
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(create_body(&fake).unwrap()["template"], "agent37-node");
+    let env = [("CRABBOX_AGENT37_TEMPLATE", " agent37-go ")];
+    let (code, out, fake) = acquire_env("fast", &json!({}), &env);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(create_body(&fake).unwrap()["template"], "agent37-go");
 }
