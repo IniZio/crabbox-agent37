@@ -9,63 +9,15 @@ use std::io::Write;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use serde_json::Value;
-
 use crate::agent37::{Agent37, ApiError, CreateSpec, Instance};
 use crate::host_key;
 use crate::protocol::{Desired, Expected, Lease, Request, Ssh};
+pub(crate) use crate::settings::{check_disk, label_ok, settings, Settings};
 
 /// Remote check that the tools crabbox needs are installed.
 const READY_CHECK: &str = "command -v bash >/dev/null && command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null";
 /// Pause between status and exec polls.
 const POLL: Duration = Duration::from_secs(1);
-
-/// Validated adapter settings from the request config.
-pub(crate) struct Settings {
-    /// Workspace-unique owner label embedded in instance names.
-    pub(crate) owner: String,
-    /// `us` or `eu`.
-    region: String,
-    /// Seconds to wait for a running VM with a readable host key.
-    pub(crate) timeout: u64,
-    /// Key file the tunnel reads the API key from, as configured.
-    pub(crate) key_file: Option<String>,
-}
-
-/// Reads and validates `owner`, `region`, `readyTimeoutSeconds` and `keyFile`.
-pub(crate) fn settings(config: &Value) -> Result<Settings, String> {
-    let owner = config
-        .get("owner")
-        .and_then(Value::as_str)
-        .filter(|o| o.len() <= 32 && o.split('-').all(label_ok))
-        .ok_or("config.owner is required: lowercase letters, digits and single dashes, at most 32 characters")?;
-    let region = match config.get("region") {
-        None | Some(Value::Null) => "us",
-        Some(Value::String(r)) if r == "us" || r == "eu" => r.as_str(),
-        Some(_) => return Err("config.region must be us or eu".to_owned()),
-    };
-    let timeout = match config.get("readyTimeoutSeconds") {
-        None | Some(Value::Null) => 300,
-        Some(v) => v
-            .as_u64()
-            .filter(|n| *n > 0)
-            .ok_or("config.readyTimeoutSeconds must be a positive integer")?,
-    };
-    let key_file = config.get("keyFile").and_then(Value::as_str);
-    Ok(Settings {
-        owner: owner.to_owned(),
-        region: region.to_owned(),
-        timeout,
-        key_file: key_file.filter(|k| !k.is_empty()).map(str::to_owned),
-    })
-}
-
-/// True for a non-empty run of `[a-z0-9]`.
-fn label_ok(s: &str) -> bool {
-    !s.is_empty()
-        && s.chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
-}
 
 /// Prefix shared by every instance of one owner.
 pub(crate) fn prefix(owner: &str) -> String {
@@ -150,11 +102,16 @@ fn find_or_create(
         return Ok((existing, false));
     }
     let (cpu, memory_gb) = class_size(desired.class.as_deref())?;
+    if let Some(disk) = settings.disk_gb {
+        check_disk(disk, cpu, memory_gb)?;
+    }
     let spec = CreateSpec {
         name: name.to_owned(),
         region: settings.region.clone(),
         cpu,
         memory_gb,
+        template: settings.template.clone(),
+        disk_gb: settings.disk_gb,
         metadata: vec![
             ("crabbox_owner".to_owned(), settings.owner.clone()),
             ("crabbox_lease_id".to_owned(), desired.lease_id.clone()),
