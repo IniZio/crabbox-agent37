@@ -332,6 +332,47 @@ fn deadline_deletes_an_instance_that_never_becomes_running() {
 }
 
 #[test]
+fn create_timeout_deletes_the_instance_agent37_went_on_to_create() {
+    let fake = FakeAgent37::start_with_key(KEY);
+    fake.set_create_fault(std::time::Duration::from_secs(3), None);
+    let mut cfg = config(&fake);
+    cfg["requestTimeoutSeconds"] = json!(1);
+    let out = run_env(&acquire_with(&cfg));
+    assert_eq!(out.code, 1, "{}", out.raw);
+    assert_eq!(
+        count(&fake, "DELETE /v1/instances/"),
+        1,
+        "{:?}",
+        seen(&fake)
+    );
+    assert!(fake.instances().is_empty());
+}
+
+#[test]
+fn gateway_error_on_create_deletes_the_instance_it_made() {
+    let fake = FakeAgent37::start_with_key(KEY);
+    fake.set_create_fault(std::time::Duration::ZERO, Some(502));
+    let out = run_env(&acquire(&fake));
+    assert_eq!(out.code, 1, "{}", out.raw);
+    assert_eq!(
+        count(&fake, "DELETE /v1/instances/"),
+        1,
+        "{:?}",
+        seen(&fake)
+    );
+    assert!(fake.instances().is_empty());
+}
+
+#[test]
+fn refused_create_sends_no_delete() {
+    let fake = FakeAgent37::start_with_key(KEY);
+    fake.set_vm_tier_limited(true);
+    let out = run_env(&acquire(&fake));
+    assert_eq!(out.code, 1, "{}", out.raw);
+    assert_eq!(count(&fake, "DELETE "), 0, "{:?}", seen(&fake));
+}
+
+#[test]
 fn failed_acquire_deletes_a_created_instance_even_with_keep() {
     let fake = FakeAgent37::start_with_key(KEY);
     fake.set_create_status("provisioning");
