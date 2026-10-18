@@ -54,8 +54,26 @@ fn spec() -> CreateSpec {
         region: "us".into(),
         cpu: 2,
         memory_gb: 4,
+        template: None,
+        disk_gb: None,
         metadata: vec![("crabbox_owner".into(), "me".into())],
     }
+}
+
+#[test]
+fn create_body_carries_template_and_disk_when_set() {
+    let body = create_body(&CreateSpec {
+        template: Some("my-workspace".into()),
+        disk_gb: Some(10),
+        ..spec()
+    });
+    assert_eq!(
+        (body.get("template"), body.get("resources")),
+        (
+            Some(&json!("my-workspace")),
+            Some(&json!({"cpu": 2, "memory": 4, "disk": 10}))
+        )
+    );
 }
 
 #[test]
