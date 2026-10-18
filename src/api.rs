@@ -10,7 +10,7 @@ use serde_json::{json, Map, Value};
 use crate::agent37::{Agent37, ApiError, CreateSpec, ExecOutput, Instance, SshKey};
 use crate::key::ApiKey;
 
-/// Image every crabbox VM is created from.
+/// Image crabbox VMs are created from when the config names no `template`.
 const TEMPLATE: &str = "agent37-ubuntu";
 
 /// Production API root, used when the config carries no `apiUrl`.
@@ -114,12 +114,18 @@ fn create_body(spec: &CreateSpec) -> Value {
         .iter()
         .map(|(k, v)| (k.clone(), Value::String(v.clone())))
         .collect();
+    let mut resources = Map::new();
+    resources.insert("cpu".into(), json!(spec.cpu));
+    resources.insert("memory".into(), json!(spec.memory_gb));
+    if let Some(disk) = spec.disk_gb {
+        resources.insert("disk".into(), json!(disk));
+    }
     json!({
-        "template": TEMPLATE,
+        "template": spec.template.as_deref().unwrap_or(TEMPLATE),
         "type": "vm",
         "region": spec.region,
         "name": spec.name,
-        "resources": {"cpu": spec.cpu, "memory": spec.memory_gb},
+        "resources": resources,
         "metadata": metadata,
         "auto_sleep": false,
     })
