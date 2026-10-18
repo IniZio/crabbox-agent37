@@ -12,6 +12,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
+use std::time::Duration;
 
 use serde_json::{json, Value};
 
@@ -90,6 +91,8 @@ struct State {
     install_probes: u32,
     /// Probes still to answer before the running install finishes.
     install_probes_left: u32,
+    /// Pause, then error status (`None` = 201), applied to the answer of `POST /v1/instances`.
+    create_fault: (Duration, Option<u16>),
 }
 
 /// Handle to a running fake; the server thread lives until the test process exits.
@@ -124,6 +127,7 @@ impl FakeAgent37 {
             install_mode: InstallMode::Succeeds,
             install_probes: 1,
             install_probes_left: 0,
+            create_fault: (Duration::ZERO, None),
         }));
         let shared = Arc::clone(&state);
         thread::spawn(move || {
@@ -237,6 +241,12 @@ impl FakeAgent37 {
         self.lock().install_probes = n;
     }
 
+    /// Makes create answer late and/or with an error `status`, after the instance exists.
+    #[allow(dead_code, reason = "each test binary uses a different subset")]
+    pub(crate) fn set_create_fault(&self, delay: Duration, status: Option<u16>) {
+        self.lock().create_fault = (delay, status);
+    }
+
     /// Tools still missing from the image.
     #[allow(dead_code, reason = "each test binary uses a different subset")]
     pub(crate) fn missing_tools(&self) -> Vec<String> {
@@ -325,6 +335,10 @@ fn serve(stream: TcpStream, state: &Mutex<State>) {
         return;
     };
     let (status, body) = route(&request, state);
+    if request.method == "POST" && request.path == "/v1/instances" {
+        let delay = state.lock().unwrap().create_fault.0;
+        thread::sleep(delay);
+    }
     let reason = match status {
         200 => "OK",
         201 => "Created",
@@ -459,6 +473,9 @@ fn create_instance(state: &mut State, body: &str) -> (u16, Value) {
         }
     }
     state.instances.push(created.clone());
+    if let Some(status) = state.create_fault.1 {
+        return (status, nested_error("upstream", "Bad gateway."));
+    }
     (201, created)
 }
 

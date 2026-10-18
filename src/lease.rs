@@ -118,11 +118,42 @@ fn find_or_create(
             ("crabbox_slug".to_owned(), desired.slug.clone()),
         ],
     };
-    let created = api
-        .create_instance(&spec)
-        .map_err(|e| e.operator_message())?;
+    let created = match api.create_instance(&spec) {
+        Ok(created) => created,
+        Err(
+            e @ (ApiError::Unreachable(_)
+            | ApiError::Decode(_)
+            | ApiError::Http {
+                status: 500..=599, ..
+            }),
+        ) => {
+            return Err(reap_unconfirmed(api, name, e.operator_message()));
+        }
+        Err(e) => return Err(e.operator_message()),
+    };
     let _ = writeln!(diag, "acquire: created {}", created.id);
     Ok((created, true))
+}
+
+/// Deletes any instance named `name` after a create whose outcome is unknown.
+///
+/// A timeout, a 5xx or an unparsable reply does not prove agent37 refused the request; the
+/// instance may exist with no lease pointing at it.
+fn reap_unconfirmed(api: &dyn Agent37, name: &str, err: String) -> String {
+    let list = match api.list_instances() {
+        Ok(list) => list,
+        Err(e) => {
+            return format!(
+                "{err}; the instance may exist, and listing to find it failed: {}",
+                e.operator_message()
+            );
+        }
+    };
+    let mut note = err;
+    for stray in list.into_iter().filter(|i| i.name.as_deref() == Some(name)) {
+        note = cleanup(api, &stray.id, true, note);
+    }
+    note
 }
 
 /// Polls until the instance runs; fails on `failed`, `stopped` or the deadline.

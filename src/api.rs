@@ -16,8 +16,18 @@ const TEMPLATE: &str = "agent37-ubuntu";
 /// Production API root, used when the config carries no `apiUrl`.
 const DEFAULT_BASE_URL: &str = "https://api.agent37.com";
 
-/// Upper bound for one whole request so a hung server cannot hang crabbox.
+/// Upper bound for one whole request when the config sets no `requestTimeoutSeconds`.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Per-request timeout from the provider config: `requestTimeoutSeconds` if a positive integer, else the default.
+#[must_use]
+pub fn request_timeout(config: &Value) -> Duration {
+    config
+        .get("requestTimeoutSeconds")
+        .and_then(Value::as_u64)
+        .filter(|secs| *secs > 0)
+        .map_or(REQUEST_TIMEOUT, Duration::from_secs)
+}
 
 /// API root from the provider config: `apiUrl` without trailing slashes, else the default.
 #[must_use]
@@ -40,12 +50,12 @@ pub struct HttpAgent37 {
 }
 
 impl HttpAgent37 {
-    /// Client for `base_url`, authenticating with `key`.
+    /// Client for `base_url`, authenticating with `key`; each request is bounded by `timeout`.
     #[must_use]
-    pub fn new(mut base_url: String, key: ApiKey) -> Self {
+    pub fn new(mut base_url: String, key: ApiKey, timeout: Duration) -> Self {
         base_url.truncate(base_url.trim_end_matches('/').len());
         let agent: ureq::Agent = ureq::Agent::config_builder()
-            .timeout_global(Some(REQUEST_TIMEOUT))
+            .timeout_global(Some(timeout))
             // Non-2xx responses are mapped by `into_body`, which reads agent37's error body.
             .http_status_as_error(false)
             .build()
