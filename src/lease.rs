@@ -98,12 +98,12 @@ fn find_or_create(
     name: &str,
     diag: &mut dyn Write,
 ) -> Result<(Instance, bool), String> {
-    if let Some(existing) = find_by_name(api, name)? {
-        return Ok((existing, false));
-    }
     let (cpu, memory_gb) = class_size(desired.class.as_deref())?;
     if let Some(disk) = settings.disk_gb {
-        check_disk(disk, cpu, memory_gb)?;
+        check_disk(settings.disk_source, disk, cpu, memory_gb)?;
+    }
+    if let Some(existing) = find_by_name(api, name)? {
+        return Ok((existing, false));
     }
     let spec = CreateSpec {
         name: name.to_owned(),
