@@ -8,9 +8,10 @@
     reason = "tests fail loudly on setup errors"
 )]
 
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use tungstenite::handshake::server::{ErrorResponse, Request, Response};
@@ -28,7 +29,16 @@ enum Behaviour {
     Bridge(SocketAddr),
     /// Close the WebSocket right away.
     CloseNow,
+    /// Send `before`, go silent for [`PAUSE`], then send `after`.
+    Pause,
+    /// Answer each ping only after [`PONG_DELAY`].
+    SlowPong,
 }
+
+/// Gateway silence in [`Behaviour::Pause`]; longer than the 5 s stall threshold.
+const PAUSE: Duration = Duration::from_secs(6);
+/// Pong delay in [`Behaviour::SlowPong`]; longer than the 1 s slow round trip.
+const PONG_DELAY: Duration = Duration::from_millis(1500);
 
 /// Accepts upgrades carrying the right key header; returns the URL.
 fn fake_endpoint(behaviour: Behaviour) -> String {
@@ -63,6 +73,20 @@ fn serve(tcp: TcpStream, behaviour: Behaviour) {
             while ws.read().is_ok() {}
         }
         Behaviour::Bridge(target) => relay(&mut ws, TcpStream::connect(target).unwrap()),
+        Behaviour::Pause => {
+            ws.send(Message::binary(b"before".to_vec())).unwrap();
+            std::thread::sleep(PAUSE);
+            ws.send(Message::binary(b"after".to_vec())).unwrap();
+            while ws.read().is_ok() {}
+        }
+        Behaviour::SlowPong => {
+            // tungstenite queues the pong and writes it on the next read.
+            while let Ok(message) = ws.read() {
+                if message.is_ping() {
+                    std::thread::sleep(PONG_DELAY);
+                }
+            }
+        }
     }
 }
 
@@ -133,6 +157,101 @@ fn wait(child: &mut std::process::Child) -> std::process::ExitStatus {
         assert!(Instant::now() < deadline, "tunnel did not exit");
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// Stderr lines of `child`, as they are written.
+fn stderr_lines(child: &mut std::process::Child) -> mpsc::Receiver<String> {
+    let stderr = BufReader::new(child.stderr.take().unwrap());
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in stderr.lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    rx
+}
+
+/// The first line starting with `prefix`, failing after 20 s.
+fn await_line(lines: &mpsc::Receiver<String>, prefix: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let line = lines
+            .recv_timeout(left)
+            .unwrap_or_else(|e| panic!("no line starting {prefix:?}: {e}"));
+        if line.starts_with(prefix) {
+            return line;
+        }
+    }
+}
+
+/// Seconds in the `key=<n>s` field of a diagnostic line.
+fn field_secs(line: &str, key: &str) -> f64 {
+    let value = line
+        .split(' ')
+        .find_map(|field| field.strip_prefix(&format!("{key}=")))
+        .unwrap_or_else(|| panic!("no {key} in {line:?}"));
+    value.strip_suffix('s').unwrap().parse().unwrap()
+}
+
+/// Gateway silence past 5 s writes a stall line, and the next data a resume line.
+#[test]
+fn gateway_pause_logs_stall_and_resume() {
+    let url = fake_endpoint(Behaviour::Pause);
+    let mut child = tunnel(HOST, &url, KEY).spawn().unwrap();
+    let stdin = child.stdin.take().unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let lines = stderr_lines(&mut child);
+    let mut got = [0_u8; 11];
+    stdout.read_exact(&mut got).unwrap();
+    assert_eq!(&got, b"beforeafter");
+    let stall = await_line(&lines, "crabbox-agent37 tunnel: stall ");
+    assert!(field_secs(&stall, "waited") >= 5.0, "{stall}");
+    let resume = await_line(&lines, "crabbox-agent37 tunnel: resume ");
+    assert!(field_secs(&resume, "waited") >= 6.0, "{resume}");
+    drop(stdin);
+    assert!(wait(&mut child).success());
+}
+
+/// On exit the summary line carries the bytes moved each way, and no payload or key.
+#[test]
+fn exit_summary_counts_bytes() {
+    let url = fake_endpoint(Behaviour::Bridge(echo_server()));
+    let mut child = tunnel(HOST, &url, KEY).spawn().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let lines = stderr_lines(&mut child);
+    stdin.write_all(b"secret-payload").unwrap();
+    let mut echoed = [0_u8; 14];
+    stdout.read_exact(&mut echoed).unwrap();
+    drop(stdin);
+    assert!(wait(&mut child).success());
+    let exit = await_line(&lines, "crabbox-agent37 tunnel: exit ");
+    assert!(exit.contains(" sent=14 received=14 "), "{exit}");
+    field_secs(&exit, "duration");
+    field_secs(&exit, "longest_wait");
+    let rest: Vec<String> = lines.try_iter().collect();
+    for line in std::iter::once(&exit).chain(&rest) {
+        assert!(
+            !line.contains("secret-payload") && !line.contains(KEY),
+            "{line}"
+        );
+    }
+}
+
+/// A pong slower than 1 s writes a round-trip line.
+#[test]
+fn slow_pong_logs_round_trip() {
+    let url = fake_endpoint(Behaviour::SlowPong);
+    let mut child = tunnel(HOST, &url, KEY).spawn().unwrap();
+    let stdin = child.stdin.take().unwrap();
+    let lines = stderr_lines(&mut child);
+    let rtt = await_line(&lines, "crabbox-agent37 tunnel: ping rtt=");
+    assert!(field_secs(&rtt, "rtt") >= 1.5, "{rtt}");
+    drop(stdin);
+    assert!(wait(&mut child).success());
 }
 
 /// Stdin bytes reach the target and its reply returns on stdout; stdin EOF exits 0.
