@@ -248,6 +248,31 @@ fn exit_summary_counts_bytes() {
     }
 }
 
+/// SIGTERM, as ssh sends its `ProxyCommand` when a session dies, still writes
+/// the summary with the signal name, and exits 128 + 15.
+#[test]
+fn sigterm_writes_exit_summary() {
+    let url = fake_endpoint(Behaviour::Bridge(echo_server()));
+    let mut child = tunnel(HOST, &url, KEY).spawn().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let lines = stderr_lines(&mut child);
+    stdin.write_all(b"secret-payload").unwrap();
+    let mut echoed = [0_u8; 14];
+    stdout.read_exact(&mut echoed).unwrap();
+    let kill = Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status();
+    assert!(kill.unwrap().success());
+    assert_eq!(wait(&mut child).code(), Some(143));
+    let exit = await_line(&lines, "crabbox-agent37 tunnel: exit ");
+    assert!(exit.contains(" signal=TERM sent=14 received=14 "), "{exit}");
+    assert!(
+        !exit.contains("secret-payload") && !exit.contains(KEY),
+        "{exit}"
+    );
+}
+
 /// A pong slower than 1 s writes a round-trip line.
 #[test]
 fn slow_pong_logs_round_trip() {

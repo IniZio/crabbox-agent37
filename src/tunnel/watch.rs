@@ -127,13 +127,14 @@ impl Watch {
         }
     }
 
-    /// Writes the exit summary.
-    pub(super) fn summary(&self, now: Instant, diag: &mut dyn Write) {
+    /// Writes the exit summary, naming the signal that ended the tunnel if any.
+    pub(super) fn summary(&self, now: Instant, signal: Option<&str>, diag: &mut dyn Write) {
         let longest = self.longest_wait.max(now - self.last_data);
+        let signal = signal.map_or_else(String::new, |name| format!(" signal={name}"));
         log(
             diag,
             &format!(
-                "exit sent={} received={} duration={} longest_wait={}",
+                "exit{signal} sent={} received={} duration={} longest_wait={}",
                 self.sent,
                 self.received,
                 secs(now - self.started),
