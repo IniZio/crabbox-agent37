@@ -29,10 +29,12 @@ enum Behaviour {
     Bridge(SocketAddr),
     /// Close the WebSocket right away.
     CloseNow,
-    /// Send `before`, go silent for [`PAUSE`], then send `after`.
+    /// Send `before`, take one client message, go silent for [`PAUSE`], then send `after`.
     Pause,
     /// Answer each ping only after [`PONG_DELAY`].
     SlowPong,
+    /// Never read, so no ping is ever answered.
+    NoPong,
 }
 
 /// Gateway silence in [`Behaviour::Pause`]; longer than the 5 s stall threshold.
@@ -75,6 +77,7 @@ fn serve(tcp: TcpStream, behaviour: Behaviour) {
         Behaviour::Bridge(target) => relay(&mut ws, TcpStream::connect(target).unwrap()),
         Behaviour::Pause => {
             ws.send(Message::binary(b"before".to_vec())).unwrap();
+            while !ws.read().unwrap().is_binary() {}
             std::thread::sleep(PAUSE);
             ws.send(Message::binary(b"after".to_vec())).unwrap();
             while ws.read().is_ok() {}
@@ -87,6 +90,7 @@ fn serve(tcp: TcpStream, behaviour: Behaviour) {
                 }
             }
         }
+        Behaviour::NoPong => std::thread::sleep(Duration::from_secs(30)),
     }
 }
 
@@ -196,17 +200,20 @@ fn field_secs(line: &str, key: &str) -> f64 {
     value.strip_suffix('s').unwrap().parse().unwrap()
 }
 
-/// Gateway silence past 5 s writes a stall line, and the next data a resume line.
+/// Sent bytes unanswered past 5 s write a stall line, and the next data a resume line.
 #[test]
 fn gateway_pause_logs_stall_and_resume() {
     let url = fake_endpoint(Behaviour::Pause);
     let mut child = tunnel(HOST, &url, KEY).spawn().unwrap();
-    let stdin = child.stdin.take().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
     let mut stdout = child.stdout.take().unwrap();
     let lines = stderr_lines(&mut child);
-    let mut got = [0_u8; 11];
-    stdout.read_exact(&mut got).unwrap();
-    assert_eq!(&got, b"beforeafter");
+    let mut before = [0_u8; 6];
+    stdout.read_exact(&mut before).unwrap();
+    stdin.write_all(b"x").unwrap();
+    let mut after = [0_u8; 5];
+    stdout.read_exact(&mut after).unwrap();
+    assert_eq!((&before, &after), (b"before", b"after"));
     let stall = await_line(&lines, "crabbox-agent37 tunnel: stall ");
     assert!(field_secs(&stall, "waited") >= 5.0, "{stall}");
     let resume = await_line(&lines, "crabbox-agent37 tunnel: resume ");
@@ -252,6 +259,40 @@ fn slow_pong_logs_round_trip() {
     assert!(field_secs(&rtt, "rtt") >= 1.5, "{rtt}");
     drop(stdin);
     assert!(wait(&mut child).success());
+}
+
+/// A ping the gateway never answers writes an unanswered line after 5 s.
+#[test]
+fn unanswered_ping_is_logged() {
+    let url = fake_endpoint(Behaviour::NoPong);
+    let mut child = tunnel(HOST, &url, KEY).spawn().unwrap();
+    let stdin = child.stdin.take().unwrap();
+    let lines = stderr_lines(&mut child);
+    let unanswered = await_line(&lines, "crabbox-agent37 tunnel: ping unanswered seq=1 ");
+    assert!(field_secs(&unanswered, "after") >= 5.0, "{unanswered}");
+    drop(stdin);
+    assert!(wait(&mut child).success());
+}
+
+/// An idle session with every byte answered stays silent past the stall threshold.
+#[test]
+fn idle_session_logs_only_exit() {
+    let url = fake_endpoint(Behaviour::Bridge(echo_server()));
+    let mut child = tunnel(HOST, &url, KEY).spawn().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let lines = stderr_lines(&mut child);
+    stdin.write_all(b"hi").unwrap();
+    let mut echoed = [0_u8; 2];
+    stdout.read_exact(&mut echoed).unwrap();
+    std::thread::sleep(PAUSE);
+    drop(stdin);
+    assert!(wait(&mut child).success());
+    let all: Vec<String> = lines.iter().collect();
+    assert!(
+        all.len() == 1 && all[0].starts_with("crabbox-agent37 tunnel: exit "),
+        "{all:?}"
+    );
 }
 
 /// Stdin bytes reach the target and its reply returns on stdout; stdin EOF exits 0.

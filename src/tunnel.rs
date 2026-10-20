@@ -244,7 +244,7 @@ fn pump<W: Write>(
                     socket
                         .send(Message::binary(chunk))
                         .map_err(|e| format!("sending to tunnel: {e}"))?;
-                    watch.sent(n);
+                    watch.sent(Instant::now(), n);
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {

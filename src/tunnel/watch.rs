@@ -6,7 +6,7 @@
 use std::io::Write;
 use std::time::{Duration, Instant};
 
-/// Silence from the gateway longer than this is reported as a stall.
+/// Sent bytes unanswered by gateway data longer than this are reported as a stall.
 const STALL: Duration = Duration::from_secs(5);
 /// Interval between WebSocket pings.
 const PING_EVERY: Duration = Duration::from_secs(5);
@@ -37,6 +37,9 @@ pub(super) struct Watch {
     last_data: Instant,
     /// Longest silence between gateway data so far.
     longest_wait: Duration,
+    /// When bytes were first sent after the last gateway data; `None` while
+    /// nothing is in flight, so an idle session never stalls.
+    awaiting: Option<Instant>,
     /// Whether a stall line was written and its resume line is pending.
     stalled: bool,
     /// When the next ping is due.
@@ -56,6 +59,7 @@ impl Watch {
             received: 0,
             last_data: now,
             longest_wait: Duration::ZERO,
+            awaiting: None,
             stalled: false,
             next_ping: now + PING_EVERY,
             seq: 0,
@@ -63,17 +67,17 @@ impl Watch {
         }
     }
 
-    /// Counts bytes sent to the gateway.
-    pub(super) const fn sent(&mut self, n: usize) {
+    /// Counts bytes sent to the gateway, which now await its data.
+    pub(super) fn sent(&mut self, now: Instant, n: usize) {
         self.sent += n as u64;
+        self.awaiting.get_or_insert(now);
     }
 
     /// Counts gateway data and reports the end of a stall.
     pub(super) fn data(&mut self, now: Instant, n: usize, diag: &mut dyn Write) {
-        let waited = now - self.last_data;
-        self.longest_wait = self.longest_wait.max(waited);
-        if self.stalled {
-            log(diag, &format!("resume waited={}", secs(waited)));
+        self.longest_wait = self.longest_wait.max(now - self.last_data);
+        if let Some(since) = self.awaiting.take().filter(|_| self.stalled) {
+            log(diag, &format!("resume waited={}", secs(now - since)));
             self.stalled = false;
         }
         self.received += n as u64;
@@ -82,10 +86,12 @@ impl Watch {
 
     /// Reports a stall or an unanswered ping; returns a ping payload when one is due.
     pub(super) fn tick(&mut self, now: Instant, diag: &mut dyn Write) -> Option<Vec<u8>> {
-        let waited = now - self.last_data;
-        if !self.stalled && waited > STALL {
-            log(diag, &format!("stall waited={}", secs(waited)));
-            self.stalled = true;
+        if let Some(since) = self.awaiting.filter(|_| !self.stalled) {
+            let waited = now - since;
+            if waited > STALL {
+                log(diag, &format!("stall waited={}", secs(waited)));
+                self.stalled = true;
+            }
         }
         if let Some(ping) = self.ping.as_mut().filter(|p| !p.reported) {
             let age = now - ping.at;
