@@ -5,7 +5,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::mpsc::{self, TryRecvError};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
@@ -13,6 +13,10 @@ use tungstenite::client::IntoClientRequest;
 use tungstenite::{Error as WsError, Message, WebSocket};
 
 use crate::key::{self, ApiKey};
+
+mod watch;
+
+use watch::Watch;
 
 /// DNS zone of instance hosts, as in `<id>.agent37.app`.
 const HOST_DOMAIN: &str = "agent37.app";
@@ -58,8 +62,15 @@ pub fn run(
     url_override: Option<String>,
     diag: &mut dyn Write,
 ) -> u8 {
-    let result = prepare(args, env_key, key_file, url_override)
-        .and_then(|(url, key)| bridge(&url, &key, std::io::stdin(), std::io::stdout().lock()));
+    let result = prepare(args, env_key, key_file, url_override).and_then(|(url, key)| {
+        bridge(
+            &url,
+            &key,
+            std::io::stdin(),
+            std::io::stdout().lock(),
+            &mut *diag,
+        )
+    });
     match result {
         Ok(()) => 0,
         Err(error) => {
@@ -180,11 +191,18 @@ fn connect(url: &str, key: &ApiKey) -> Result<WebSocket<Transport>, String> {
     Ok(socket)
 }
 
-/// Pumps `input` to the WebSocket and WebSocket payloads to `output`.
+/// Pumps `input` to the WebSocket and WebSocket payloads to `output`, then
+/// writes the exit summary to `diag`.
 ///
 /// `Ok` means the local side hung up (ssh exited); a server close or any
 /// network failure is an error so the caller sees the tunnel die.
-fn bridge<R, W>(url: &str, key: &ApiKey, input: R, mut output: W) -> Result<(), String>
+fn bridge<R, W>(
+    url: &str,
+    key: &ApiKey,
+    input: R,
+    mut output: W,
+    diag: &mut dyn Write,
+) -> Result<(), String>
 where
     R: Read + Send + 'static,
     W: Write,
@@ -203,13 +221,31 @@ where
             }
         }
     });
+    let mut watch = Watch::new(Instant::now());
+    let result = pump(&mut socket, &rx, &mut output, &mut watch, diag);
+    watch.summary(Instant::now(), diag);
+    result
+}
+
+/// The transfer loop of [`bridge`].
+fn pump<W: Write>(
+    socket: &mut WebSocket<Transport>,
+    rx: &mpsc::Receiver<Vec<u8>>,
+    output: &mut W,
+    watch: &mut Watch,
+    diag: &mut dyn Write,
+) -> Result<(), String> {
     // The read timeout is the only wakeup, so stdin is polled between reads.
     loop {
         loop {
             match rx.try_recv() {
-                Ok(chunk) => socket
-                    .send(Message::binary(chunk))
-                    .map_err(|e| format!("sending to tunnel: {e}"))?,
+                Ok(chunk) => {
+                    let n = chunk.len();
+                    socket
+                        .send(Message::binary(chunk))
+                        .map_err(|e| format!("sending to tunnel: {e}"))?;
+                    watch.sent(Instant::now(), n);
+                }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     let _ = socket.close(None);
@@ -217,9 +253,21 @@ where
                 }
             }
         }
+        if let Some(payload) = watch.tick(Instant::now(), diag) {
+            socket
+                .send(Message::Ping(payload.into()))
+                .map_err(|e| format!("sending to tunnel: {e}"))?;
+        }
         match socket.read() {
-            Ok(Message::Binary(data)) => forward(&mut output, data.as_slice())?,
-            Ok(Message::Text(text)) => forward(&mut output, text.as_str().as_bytes())?,
+            Ok(Message::Binary(data)) => {
+                watch.data(Instant::now(), data.len(), diag);
+                forward(output, data.as_slice())?;
+            }
+            Ok(Message::Text(text)) => {
+                watch.data(Instant::now(), text.len(), diag);
+                forward(output, text.as_str().as_bytes())?;
+            }
+            Ok(Message::Pong(payload)) => watch.pong(Instant::now(), payload.as_slice(), diag),
             Ok(Message::Close(_)) => return Err("tunnel closed by server".to_owned()),
             Ok(_) => {}
             Err(WsError::Io(e))
