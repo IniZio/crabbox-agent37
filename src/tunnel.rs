@@ -1,14 +1,17 @@
 //! `tunnel <host>`: an SSH `ProxyCommand` that carries the SSH byte stream over
 //! agent37's WebSocket endpoint, so hosts need no node or `agent37` npm CLI.
 
+use std::ffi::c_int;
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, TryRecvError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
+use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 use tungstenite::client::IntoClientRequest;
 use tungstenite::{Error as WsError, Message, WebSocket};
 
@@ -30,6 +33,9 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 const POLL: Duration = Duration::from_millis(10);
 /// Bytes read from stdin per WebSocket frame.
 const CHUNK: usize = 16 * 1024;
+/// Signals that end the tunnel with its exit summary, and their names in it.
+/// ssh sends `TERM` or `HUP` to its `ProxyCommand` when the session dies.
+const SIGNALS: [(c_int, &str); 3] = [(SIGTERM, "TERM"), (SIGHUP, "HUP"), (SIGINT, "INT")];
 
 /// Instance id from an `<id>.agent37.app` host; anything else is refused.
 pub fn instance_id(host: &str) -> Result<&str, String> {
@@ -72,7 +78,8 @@ pub fn run(
         )
     });
     match result {
-        Ok(()) => 0,
+        Ok(None) => 0,
+        Ok(Some(signo)) => u8::try_from(128 + signo).unwrap_or(u8::MAX),
         Err(error) => {
             let _ = writeln!(diag, "crabbox-agent37 tunnel: {error}");
             1
@@ -194,20 +201,27 @@ fn connect(url: &str, key: &ApiKey) -> Result<WebSocket<Transport>, String> {
 /// Pumps `input` to the WebSocket and WebSocket payloads to `output`, then
 /// writes the exit summary to `diag`.
 ///
-/// `Ok` means the local side hung up (ssh exited); a server close or any
-/// network failure is an error so the caller sees the tunnel die.
+/// `Ok(None)` means the local side hung up (ssh exited) and `Ok(Some(signo))`
+/// that one of [`SIGNALS`] arrived; a server close or any network failure is
+/// an error so the caller sees the tunnel die.
 fn bridge<R, W>(
     url: &str,
     key: &ApiKey,
     input: R,
     mut output: W,
     diag: &mut dyn Write,
-) -> Result<(), String>
+) -> Result<Option<c_int>, String>
 where
     R: Read + Send + 'static,
     W: Write,
 {
     let mut socket = connect(url, key)?;
+    // Holds the index into SIGNALS plus one of the last signal caught, 0 for none.
+    let caught = Arc::new(AtomicUsize::new(0));
+    for (index, (signo, _)) in SIGNALS.iter().enumerate() {
+        signal_hook::flag::register_usize(*signo, Arc::clone(&caught), index + 1)
+            .map_err(|e| format!("installing signal handler: {e}"))?;
+    }
     let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(16);
     std::thread::spawn(move || {
         let mut input = input;
@@ -222,9 +236,10 @@ where
         }
     });
     let mut watch = Watch::new(Instant::now());
-    let result = pump(&mut socket, &rx, &mut output, &mut watch, diag);
-    watch.summary(Instant::now(), diag);
-    result
+    let result = pump(&mut socket, &rx, &mut output, &mut watch, &caught, diag);
+    let signal = result.as_ref().ok().copied().flatten();
+    watch.summary(Instant::now(), signal.map(|(_, name)| name), diag);
+    result.map(|signal| signal.map(|(signo, _)| signo))
 }
 
 /// The transfer loop of [`bridge`].
@@ -233,10 +248,18 @@ fn pump<W: Write>(
     rx: &mpsc::Receiver<Vec<u8>>,
     output: &mut W,
     watch: &mut Watch,
+    caught: &AtomicUsize,
     diag: &mut dyn Write,
-) -> Result<(), String> {
-    // The read timeout is the only wakeup, so stdin is polled between reads.
+) -> Result<Option<(c_int, &'static str)>, String> {
+    // The read timeout is the only wakeup, so stdin and signals are polled between reads.
     loop {
+        if let Some(signal) = caught
+            .load(Ordering::Relaxed)
+            .checked_sub(1)
+            .and_then(|index| SIGNALS.get(index))
+        {
+            return Ok(Some(*signal));
+        }
         loop {
             match rx.try_recv() {
                 Ok(chunk) => {
@@ -249,7 +272,7 @@ fn pump<W: Write>(
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     let _ = socket.close(None);
-                    return Ok(());
+                    return Ok(None);
                 }
             }
         }
@@ -273,7 +296,9 @@ fn pump<W: Write>(
             Err(WsError::Io(e))
                 if matches!(
                     e.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::Interrupted
                 ) => {}
             Err(e) => return Err(format!("tunnel lost: {e}")),
         }
