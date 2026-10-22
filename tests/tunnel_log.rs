@@ -142,7 +142,6 @@ fn server_close_is_logged_with_code_and_reason() {
     );
     let mode = std::fs::metadata(&log).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o600);
-    eprintln!("SAMPLE {closed}");
 }
 
 /// A dropped TCP connection reads as a reset or EOF, not as a server close.
@@ -162,7 +161,6 @@ fn abrupt_drop_is_logged_as_reset_not_close() {
         "{lost}"
     );
     assert!(!lost.contains("closed by server"), "{lost}");
-    eprintln!("SAMPLE {lost}");
     assert!(
         !lines.iter().any(|l| l.contains("closed by server")),
         "{lines:?}"
