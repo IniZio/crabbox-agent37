@@ -12,6 +12,7 @@ fn main() -> ExitCode {
             std::env::var("AGENT37_API_KEY").ok(),
             std::env::var("AGENT37_KEY_FILE").ok(),
             std::env::var("AGENT37_TUNNEL_URL").ok(),
+            std::env::var("CRABBOX_AGENT37_TUNNEL_LOG").ok().as_deref(),
             &mut stderr,
         );
         return ExitCode::from(code);
