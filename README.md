@@ -132,6 +132,7 @@ The adapter reads the VM's ed25519 SSH host key over the agent37 exec API as roo
 `crabbox-agent37 tunnel <id>.agent37.app` is an SSH `ProxyCommand`: it bridges stdin and stdout to the instance's SSH WebSocket (`wss://<id>-22022.agent37.app/`, key in the `X-Agent37-Key` header). It needs no node or `agent37` CLI.
 
 - The key comes from `AGENT37_API_KEY`, or from the 0600 file named by `AGENT37_KEY_FILE`.
+- `CRABBOX_AGENT37_TUNNEL_LOG=<file>` also appends every diagnostic line (stall, resume, slow ping, close or loss, exit summary) to that file, each prefixed with a UTC timestamp, the process id and the host. ssh discards a backgrounded `ProxyCommand`'s stderr, so set it to learn why a tunnel dropped. A server close records its code and reason; a network failure records its I/O error kind or "reset or EOF". The file is created 0600 and appended with whole-line writes, so concurrent tunnels can share it. If it cannot be opened the tunnel warns once on stderr and runs on. The log never holds the API key or any header.
 - Any other host exits 1. A server close or network loss also exits nonzero; ssh exiting (stdin EOF) exits 0.
 - `ssh -o ProxyCommand="crabbox-agent37 tunnel %h" root@<id>.agent37.app` is the manual check against a real instance.
 

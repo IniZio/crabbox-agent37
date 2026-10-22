@@ -13,12 +13,16 @@ use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 use tungstenite::client::IntoClientRequest;
+use tungstenite::error::ProtocolError;
+use tungstenite::protocol::CloseFrame;
 use tungstenite::{Error as WsError, Message, WebSocket};
 
 use crate::key::{self, ApiKey};
 
+mod diaglog;
 mod watch;
 
+use diaglog::DiagLog;
 use watch::Watch;
 
 /// DNS zone of instance hosts, as in `<id>.agent37.app`.
@@ -61,13 +65,21 @@ pub fn endpoint(id: &str) -> String {
 ///
 /// `url_override` replaces the endpoint for tests and is honoured only for
 /// loopback `ws://` URLs, so the key can never be sent in clear to a real host.
+/// `log_path` names a file that also receives every diagnostic line.
 pub fn run(
     args: &[String],
     env_key: Option<String>,
     key_file: Option<String>,
     url_override: Option<String>,
-    diag: &mut dyn Write,
+    log_path: Option<&str>,
+    stderr: &mut dyn Write,
 ) -> u8 {
+    let mut diag = DiagLog::open(
+        stderr,
+        log_path.filter(|path| !path.is_empty()),
+        args.first().map_or("-", String::as_str),
+    );
+    let diag = &mut diag;
     let result = prepare(args, env_key, key_file, url_override).and_then(|(url, key)| {
         bridge(
             &url,
@@ -291,7 +303,7 @@ fn pump<W: Write>(
                 forward(output, text.as_str().as_bytes())?;
             }
             Ok(Message::Pong(payload)) => watch.pong(Instant::now(), payload.as_slice(), diag),
-            Ok(Message::Close(_)) => return Err("tunnel closed by server".to_owned()),
+            Ok(Message::Close(frame)) => return Err(describe_close(frame.as_ref())),
             Ok(_) => {}
             Err(WsError::Io(e))
                 if matches!(
@@ -300,8 +312,34 @@ fn pump<W: Write>(
                         | std::io::ErrorKind::TimedOut
                         | std::io::ErrorKind::Interrupted
                 ) => {}
-            Err(e) => return Err(format!("tunnel lost: {e}")),
+            Err(e) => return Err(describe_loss(&e)),
         }
+    }
+}
+
+/// What the server's close frame said, as `code=<n> reason="<text>"`.
+fn describe_close(frame: Option<&CloseFrame>) -> String {
+    frame.map_or_else(
+        || "tunnel closed by server with no close frame".to_owned(),
+        |f| {
+            format!(
+                "tunnel closed by server code={} reason={:?}",
+                u16::from(f.code),
+                &*f.reason
+            )
+        },
+    )
+}
+
+/// Why the connection failed without a close frame: an I/O error with its
+/// kind, or the peer ending the stream with no closing handshake.
+fn describe_loss(error: &WsError) -> String {
+    match error {
+        WsError::Io(e) => format!("tunnel lost: io error kind={:?}: {e}", e.kind()),
+        WsError::Protocol(ProtocolError::ResetWithoutClosingHandshake) => {
+            "tunnel lost: connection reset or EOF without a closing handshake".to_owned()
+        }
+        other => format!("tunnel lost: {other}"),
     }
 }
 
