@@ -6,7 +6,7 @@ use serde_json::Value;
 pub(crate) struct Settings {
     /// Workspace-unique owner label embedded in instance names.
     pub(crate) owner: String,
-    /// `us` or `eu`.
+    /// `us`, `eu` or `ap-south`.
     pub(crate) region: String,
     /// Seconds to wait for a running VM with a readable host key.
     pub(crate) timeout: u64,
@@ -45,8 +45,8 @@ pub(crate) fn settings_with_env(
         .ok_or("config.owner is required: lowercase letters, digits and single dashes, at most 32 characters")?;
     let region = match config.get("region") {
         None | Some(Value::Null) => "us",
-        Some(Value::String(r)) if r == "us" || r == "eu" => r.as_str(),
-        Some(_) => return Err("config.region must be us or eu".to_owned()),
+        Some(Value::String(r)) if matches!(r.as_str(), "us" | "eu" | "ap-south") => r.as_str(),
+        Some(_) => return Err("config.region must be us, eu or ap-south".to_owned()),
     };
     let timeout = match config.get("readyTimeoutSeconds") {
         None | Some(Value::Null) => 300,
@@ -135,6 +135,18 @@ mod tests {
                 .find(|(n, _)| *n == k)
                 .map(|(_, v)| (*v).to_owned())
         })
+    }
+
+    #[test]
+    fn region_accepts_known_regions_and_refuses_others() {
+        for region in ["us", "eu", "ap-south"] {
+            let s = with(&json!({"owner": "alice", "region": region}), &[]).unwrap();
+            assert_eq!(s.region, region);
+        }
+        let err = with(&json!({"owner": "alice", "region": "mars"}), &[])
+            .err()
+            .unwrap();
+        assert_eq!(err, "config.region must be us, eu or ap-south");
     }
 
     #[test]

@@ -43,7 +43,7 @@ pub struct SshKey {
 pub struct CreateSpec {
     /// Instance name.
     pub name: String,
-    /// Region, `us` or `eu`.
+    /// Region, `us`, `eu` or `ap-south`.
     pub region: String,
     /// vCPU count.
     pub cpu: u32,

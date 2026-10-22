@@ -72,7 +72,7 @@ Do not put the key in crabbox config. One team key is held on the controller hos
 | `apiUrl` | agent37 API URL. Default `https://api.agent37.com`. |
 | `keyFile` | Path to a 0600 file that holds the API key. |
 | `owner` | Required. Label for your instances: lowercase letters, digits and single dashes, at most 32 characters. Instances are named `crabbox-<owner>--<name>`. |
-| `region` | `us` (default) or `eu`. |
+| `region` | `us` (default), `eu` or `ap-south`. |
 | `readyTimeoutSeconds` | Seconds to wait for a running VM, and for pause and resume. Positive integer. Default 300. |
 | `requestTimeoutSeconds` | Seconds one agent37 API request may take. Positive integer. Default 30. |
 | `template` | Template to create VMs from: a workspace template name or an `agent37-` system template. Non-empty string. Default `agent37-ubuntu`. Env `CRABBOX_AGENT37_TEMPLATE` overrides it. |
@@ -97,7 +97,7 @@ Instance caps depend on the workspace funding tier:
 | $100 total top-ups | 50 |
 | $250 total top-ups | 200 |
 
-Set moor's per-provider cap to match your tier. Regions are `us` (default) and `eu`.
+Set moor's per-provider cap to match your tier. Regions are `us` (default), `eu` and `ap-south`.
 
 VM instances cost $11.36 to $90.16 per month always-on, from 2 vCPU/4 GB to 16 vCPU/32 GB. Billing is per minute. A stopped instance bills disk only.
 

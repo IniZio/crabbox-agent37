@@ -194,6 +194,15 @@ fn configured_region_is_honoured() {
 }
 
 #[test]
+fn ap_south_region_is_sent_to_agent37() {
+    let fake = FakeAgent37::start_with_key(KEY);
+    let mut cfg = config(&fake);
+    cfg["region"] = json!("ap-south");
+    run_env(&acquire_with(&cfg)).lease();
+    assert_eq!(create_body(&fake)["region"], "ap-south");
+}
+
+#[test]
 fn unknown_class_fails_without_creating() {
     let fake = FakeAgent37::start_with_key(KEY);
     let mut request = acquire(&fake);
