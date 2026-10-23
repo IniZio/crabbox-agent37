@@ -468,8 +468,9 @@ fn exec_count(fake: &FakeAgent37, prefix: &str) -> usize {
 fn acquire_with_all_tools_present_probes_once() {
     let fake = FakeAgent37::start_with_key(KEY);
     run_env(&acquire(&fake)).lease();
-    assert_eq!(count(&fake, "POST /v1/instances/vm00000001/exec"), 2);
+    assert_eq!(count(&fake, "POST /v1/instances/vm00000001/exec"), 3);
     assert_eq!(exec_count(&fake, ": crabbox-tools-probe; "), 1);
+    assert_eq!(exec_count(&fake, ": crabbox-docker-root; "), 1);
     assert_eq!(exec_count(&fake, ": crabbox-tools-install; "), 0);
 }
 

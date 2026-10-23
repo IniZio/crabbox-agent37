@@ -102,25 +102,30 @@ pub(crate) fn label_ok(s: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
 }
 
-/// Rejects a disk size outside agent37's range for the shape (2 GB up to 12/20/40/80 GB).
-pub(crate) fn check_disk(
+/// Disk size in GB to create a VM with: `disk_gb` when set, else the shape's maximum.
+///
+/// The maximum is the default because growing a disk later needs a resize, and agent37
+/// cold-boots a VM on every resize, which kills whatever the Box is running.
+/// Rejects a size outside agent37's range for the shape (2 GB up to 12/20/40/80 GB).
+pub(crate) fn disk_for(
     source: &str,
-    disk_gb: u32,
+    disk_gb: Option<u32>,
     cpu: u32,
     memory_gb: u32,
-) -> Result<(), String> {
+) -> Result<u32, String> {
     let max = match cpu {
         2 => 12,
         4 => 20,
         8 => 40,
         _ => 80,
     };
-    if (2..=max).contains(&disk_gb) {
-        return Ok(());
+    match disk_gb {
+        None => Ok(max),
+        Some(gb) if (2..=max).contains(&gb) => Ok(gb),
+        Some(gb) => Err(format!(
+            "{source} {gb} is outside 2-{max} GB for a {cpu} vCPU / {memory_gb} GB VM"
+        )),
     }
-    Err(format!(
-        "{source} {disk_gb} is outside 2-{max} GB for a {cpu} vCPU / {memory_gb} GB VM"
-    ))
 }
 
 #[cfg(test)]

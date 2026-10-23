@@ -55,16 +55,16 @@ fn spec() -> CreateSpec {
         cpu: 2,
         memory_gb: 4,
         template: None,
-        disk_gb: None,
+        disk_gb: 12,
         metadata: vec![("crabbox_owner".into(), "me".into())],
     }
 }
 
 #[test]
-fn create_body_carries_template_and_disk_when_set() {
+fn create_body_carries_template_and_disk() {
     let body = create_body(&CreateSpec {
         template: Some("my-workspace".into()),
-        disk_gb: Some(10),
+        disk_gb: 10,
         ..spec()
     });
     assert_eq!(
@@ -85,7 +85,7 @@ fn create_body_is_exact() {
             "type": "vm",
             "region": "us",
             "name": "crabbox-me--box",
-            "resources": {"cpu": 2, "memory": 4},
+            "resources": {"cpu": 2, "memory": 4, "disk": 12},
             "metadata": {"crabbox_owner": "me"},
             "auto_sleep": false
         })

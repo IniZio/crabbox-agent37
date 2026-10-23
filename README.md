@@ -33,6 +33,7 @@ provider: external
 target: linux
 external:
   command: /home/you/.local/bin/crabbox-agent37
+  workRoot: /root/work
   capabilities:
     idempotentLeaseId: true
     pauseResume: true
@@ -45,6 +46,8 @@ external:
     region: us
     sshKey: /home/you/.ssh/agent37_team
 ```
+
+`workRoot: /root/work` is required: it puts crabbox's work on the VM's billed disk (see Disk). crabbox takes the work root only from this config key; it overwrites any work root an adapter reports in its lease.
 
 `capabilities.pauseResume` and `connection.ssh.trustProviderOutput` are honoured only in trusted user config. Repository config, environment variables and flags cannot enable them. Use an absolute path for `command`.
 
@@ -76,7 +79,7 @@ Do not put the key in crabbox config. One team key is held on the controller hos
 | `readyTimeoutSeconds` | Seconds to wait for a running VM, and for pause and resume. Positive integer. Default 300. |
 | `requestTimeoutSeconds` | Seconds one agent37 API request may take. Positive integer. Default 30. |
 | `template` | Template to create VMs from: a workspace template name or an `agent37-` system template. Non-empty string. Default `agent37-ubuntu`. Env `CRABBOX_AGENT37_TEMPLATE` overrides it. |
-| `diskGb` | Disk size in GB, sent as `resources.disk`. Whole number from 2 up to 12, 20, 40 or 80 for the standard, fast, large or beast class. Default: not sent. Env `CRABBOX_AGENT37_DISK_GB` overrides it. |
+| `diskGb` | Disk size in GB, sent as `resources.disk`. Whole number from 2 up to 12, 20, 40 or 80 for the standard, fast, large or beast class. Default: that maximum. Env `CRABBOX_AGENT37_DISK_GB` overrides it. See Disk below. |
 | `sshKey` | Path to the private SSH key. `<sshKey>.pub` must be registered with the workspace. |
 
 ## Rules
@@ -100,6 +103,16 @@ Instance caps depend on the workspace funding tier:
 Set moor's per-provider cap to match your tier. Regions are `us` (default) and `eu`.
 
 VM instances cost $11.36 to $90.16 per month always-on, from 2 vCPU/4 GB to 16 vCPU/32 GB. Billing is per minute. A stopped instance bills disk only.
+
+## Disk
+
+An agent37 VM has two disks. `/` is an overlay on a fixed 10 GB OS disk. The billed disk, the one `diskGb` sizes, is mounted at `/root`. Without `external.workRoot`, crabbox works under `/work/crabbox` on `/`, and a build fills 10 GB whatever `diskGb` says. With `workRoot: /root/work` the work lands on the billed disk.
+
+Docker keeps its images under its data root, also on `/` by default. On a VM it creates, `acquire` writes `"data-root": "/root/docker"` into `/etc/docker/daemon.json` and keeps any other keys there, so a repo that installs or uses Docker stores images on the billed disk. `agent37-ubuntu` already ships that setting. A VM has no init system: agent37 starts dockerd at boot, and stopping dockerd reboots the VM. So if dockerd already runs on another root, `acquire` stops and starts the VM before it reads the host key. If Docker is still on another root afterwards, or the file cannot be merged, acquire fails and deletes the VM. A VM that already exists is left as it is.
+
+The disk is created at the class maximum unless `diskGb` says otherwise. Disk bills at $0.09 per GB per month, so the largest, 80 GB, costs $7.20 a month.
+
+agent37 can grow a disk later (`POST /v1/instances/{id}/resize`). On a VM every resize is a cold boot that ends every process on the Box, so the adapter never resizes a running VM. The filesystem at `/root` grows into the new space on that boot and its data is kept. A future option, not built: resize a stopped VM before `resume` starts it, since that boot happens anyway.
 
 ## Sleep
 

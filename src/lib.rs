@@ -5,6 +5,7 @@
 
 pub mod agent37;
 pub mod api;
+mod docker_root;
 pub mod doctor;
 mod fingerprint;
 mod host_key;
