@@ -13,7 +13,7 @@ mod fake_agent37;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use fake_agent37::FakeAgent37;
+use fake_agent37::{Dockerd, FakeAgent37};
 use serde_json::{json, Value};
 
 /// Key the fake accepts.
@@ -82,12 +82,81 @@ fn create_body(fake: &FakeAgent37) -> Option<Value> {
 }
 
 #[test]
-fn unset_keeps_default_template_and_sends_no_disk() {
-    let (code, out, fake) = acquire("standard", &json!({}));
+fn unset_disk_asks_for_the_class_maximum() {
+    for (class, shape) in [
+        ("standard", json!({"cpu": 2, "memory": 4, "disk": 12})),
+        ("fast", json!({"cpu": 4, "memory": 8, "disk": 20})),
+        ("large", json!({"cpu": 8, "memory": 16, "disk": 40})),
+        ("beast", json!({"cpu": 16, "memory": 32, "disk": 80})),
+    ] {
+        let (code, out, fake) = acquire(class, &json!({}));
+        assert_eq!(code, 0, "{class}: {out}");
+        let body = create_body(&fake).unwrap();
+        assert_eq!(body["template"], "agent37-ubuntu");
+        assert_eq!(body["resources"], shape, "{class}");
+    }
+}
+
+/// Requests whose method and path end match, such as `("POST", "/stop")`.
+fn calls(fake: &FakeAgent37, method: &str, suffix: &str) -> usize {
+    fake.requests()
+        .iter()
+        .filter(|r| r.method == method && r.path.ends_with(suffix))
+        .filter(|r| suffix != "/exec" || r.body.contains("crabbox-docker-root"))
+        .count()
+}
+
+/// Acquires a new standard VM against a fake whose dockerd behaves as `mode`.
+fn acquire_with_dockerd(mode: Dockerd) -> (i32, Value, FakeAgent37) {
+    let fake = FakeAgent37::start_with_key(KEY);
+    fake.set_dockerd(mode);
+    acquire_on(fake, "standard", &json!({}), &[])
+}
+
+#[test]
+fn a_created_vm_gets_docker_data_on_the_billed_disk() {
+    let (code, out, fake) = acquire_with_dockerd(Dockerd::OnBilledDisk);
     assert_eq!(code, 0, "{out}");
-    let body = create_body(&fake).unwrap();
-    assert_eq!(body["template"], "agent37-ubuntu");
-    assert_eq!(body["resources"], json!({"cpu": 2, "memory": 4}));
+    assert!(fake.docker_root_set(out["lease"]["cloudId"].as_str().unwrap()));
+    assert_eq!(calls(&fake, "POST", "/exec"), 1);
+    assert_eq!(calls(&fake, "POST", "/stop"), 0);
+}
+
+#[test]
+fn an_existing_vm_keeps_its_docker_config() {
+    let fake = FakeAgent37::start_with_key(KEY);
+    fake.add_instance("i1", "crabbox-alice--crabbox-blue-crab-000000000001", "vm");
+    let (code, out, fake) = acquire_on(fake, "standard", &json!({}), &[]);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(calls(&fake, "POST", "/exec"), 0);
+}
+
+#[test]
+fn a_running_dockerd_elsewhere_is_moved_by_a_reboot() {
+    let (code, out, fake) = acquire_with_dockerd(Dockerd::ElsewhereUntilBoot);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(calls(&fake, "POST", "/stop"), 1);
+    assert_eq!(calls(&fake, "POST", "/start"), 1);
+    assert_eq!(calls(&fake, "POST", "/exec"), 2);
+    let id = out["lease"]["cloudId"].as_str().unwrap();
+    let key = out["lease"]["ssh"]["hostKey"].as_str().unwrap();
+    assert_eq!(key, fake.current_host_key(id));
+}
+
+#[test]
+fn docker_off_the_billed_disk_fails_acquire_and_deletes_the_vm() {
+    for (mode, says) in [
+        (
+            Dockerd::AlwaysElsewhere,
+            "dockerd is still not on /root/docker after a reboot",
+        ),
+        (Dockerd::ScriptFails, "JSONDecodeError"),
+    ] {
+        let (code, out, fake) = acquire_with_dockerd(mode);
+        assert_eq!(code, 1, "{out}");
+        assert!(out.to_string().contains(says), "{out}");
+        assert!(fake.instances().is_empty(), "{:?}", fake.instances());
+    }
 }
 
 #[test]

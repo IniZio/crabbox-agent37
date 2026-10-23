@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use crate::agent37::{Agent37, ApiError, CreateSpec, Instance};
 use crate::host_key;
 use crate::protocol::{Desired, Expected, Lease, Request, Ssh};
-pub(crate) use crate::settings::{check_disk, label_ok, settings, Settings};
+pub(crate) use crate::settings::{disk_for, label_ok, settings, Settings};
 
 /// Remote check that the tools crabbox needs are installed.
 const READY_CHECK: &str = "command -v bash >/dev/null && command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null";
@@ -99,9 +99,7 @@ fn find_or_create(
     diag: &mut dyn Write,
 ) -> Result<(Instance, bool), String> {
     let (cpu, memory_gb) = class_size(desired.class.as_deref())?;
-    if let Some(disk) = settings.disk_gb {
-        check_disk(settings.disk_source, disk, cpu, memory_gb)?;
-    }
+    let disk_gb = disk_for(settings.disk_source, settings.disk_gb, cpu, memory_gb)?;
     if let Some(existing) = find_by_name(api, name)? {
         return Ok((existing, false));
     }
@@ -111,7 +109,7 @@ fn find_or_create(
         cpu,
         memory_gb,
         template: settings.template.clone(),
-        disk_gb: settings.disk_gb,
+        disk_gb,
         metadata: vec![
             ("crabbox_owner".to_owned(), settings.owner.clone()),
             ("crabbox_lease_id".to_owned(), desired.lease_id.clone()),
@@ -131,7 +129,11 @@ fn find_or_create(
         }
         Err(e) => return Err(e.operator_message()),
     };
-    let _ = writeln!(diag, "acquire: created {}", created.id);
+    let _ = writeln!(
+        diag,
+        "acquire: created {} with a {disk_gb} GB disk",
+        created.id
+    );
     Ok((created, true))
 }
 
@@ -281,12 +283,11 @@ pub fn acquire(
     let id = instance.id.clone();
     let deadline = Instant::now() + Duration::from_secs(s.timeout);
     let ready = wait_running(api, instance, deadline, s.timeout).and_then(|()| {
+        let _ = writeln!(diag, "acquire: checking required tools");
+        crate::tools::ensure(api, &id, deadline, diag)?;
+        crate::docker_root::ensure(api, &id, created, deadline, diag)?;
         let _ = writeln!(diag, "acquire: reading host key");
         fetch_host_key(api, &id, deadline)
-    });
-    let ready = ready.and_then(|key| {
-        let _ = writeln!(diag, "acquire: checking required tools");
-        crate::tools::ensure(api, &id, deadline, diag).map(|()| key)
     });
     match ready {
         Ok(key) => build_lease(desired.clone(), &id, "ready", Some(key), proxy),

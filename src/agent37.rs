@@ -51,8 +51,8 @@ pub struct CreateSpec {
     pub memory_gb: u32,
     /// Template to create from; `None` means the adapter default.
     pub template: Option<String>,
-    /// Disk size in GB; `None` leaves the size to agent37.
-    pub disk_gb: Option<u32>,
+    /// Disk size in GB.
+    pub disk_gb: u32,
     /// String metadata attached to the instance.
     pub metadata: Vec<(String, String)>,
 }

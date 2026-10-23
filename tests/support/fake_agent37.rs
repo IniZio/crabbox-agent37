@@ -16,6 +16,12 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
+#[path = "fake_scripts.rs"]
+mod scripts;
+#[allow(unused_imports, reason = "each test binary uses a different subset")]
+pub(crate) use scripts::Dockerd;
+use scripts::{tool_install, tool_probe, DockerRoot};
+
 /// One request as the fake saw it.
 #[derive(Clone, Debug)]
 #[allow(dead_code, reason = "each test binary reads a different subset")]
@@ -93,6 +99,8 @@ struct State {
     install_probes_left: u32,
     /// Pause, then error status (`None` = 201), applied to the answer of `POST /v1/instances`.
     create_fault: (Duration, Option<u16>),
+    /// Docker data-root state per instance.
+    docker_root: DockerRoot,
 }
 
 /// Handle to a running fake; the server thread lives until the test process exits.
@@ -128,6 +136,7 @@ impl FakeAgent37 {
             install_probes: 1,
             install_probes_left: 0,
             create_fault: (Duration::ZERO, None),
+            docker_root: DockerRoot::default(),
         }));
         let shared = Arc::clone(&state);
         thread::spawn(move || {
@@ -508,6 +517,7 @@ fn set_power(state: &mut State, id: &str, start: bool) -> (u16, Value) {
     instance["status"] = json!(status);
     if start {
         *state.key_generations.entry(id.to_owned()).or_insert(0) += 1;
+        state.docker_root.boot(id);
         let left = state.exec_fails_after_start;
         state.exec_failures_left.insert(id.to_owned(), left);
     }
@@ -552,44 +562,12 @@ fn exec(state: &mut State, id: &str, body: &str) -> (u16, Value) {
         (200, tool_probe(state))
     } else if parsed["user"] == "root" && command.starts_with(": crabbox-tools-install; ") {
         (200, tool_install(state))
+    } else if parsed["user"] == "root" && command.starts_with(": crabbox-docker-root; ") {
+        (200, state.docker_root.run(id))
     } else {
         (
             200,
             json!({ "exit_code": 127, "stdout": "", "stderr": "command not found" }),
         )
     }
-}
-
-/// Answers the tool probe, finishing a running install once its probes are spent.
-fn tool_probe(state: &mut State) -> Value {
-    if state.tool_install == "running" {
-        state.install_probes_left = state.install_probes_left.saturating_sub(1);
-        if state.install_probes_left == 0 {
-            if state.install_mode == InstallMode::Fails {
-                "failed".clone_into(&mut state.tool_install);
-            } else {
-                state.missing_tools.clear();
-                "ok".clone_into(&mut state.tool_install);
-            }
-        }
-    }
-    let mut stdout = format!(
-        "missing: {}\ninstall:{}\n",
-        state.missing_tools.join(" "),
-        state.tool_install
-    );
-    if state.tool_install == "failed" {
-        stdout.push_str("E: Unable to locate package rsync\n");
-    }
-    json!({ "exit_code": 0, "stdout": stdout, "stderr": "" })
-}
-
-/// Answers the detached tool install start.
-fn tool_install(state: &mut State) -> Value {
-    if state.install_mode == InstallMode::NoApt {
-        return json!({ "exit_code": 3, "stdout": "", "stderr": "no apt-get\n" });
-    }
-    "running".clone_into(&mut state.tool_install);
-    state.install_probes_left = state.install_probes;
-    json!({ "exit_code": 0, "stdout": "", "stderr": "" })
 }

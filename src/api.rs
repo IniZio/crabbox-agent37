@@ -127,9 +127,7 @@ fn create_body(spec: &CreateSpec) -> Value {
     let mut resources = Map::new();
     resources.insert("cpu".into(), json!(spec.cpu));
     resources.insert("memory".into(), json!(spec.memory_gb));
-    if let Some(disk) = spec.disk_gb {
-        resources.insert("disk".into(), json!(disk));
-    }
+    resources.insert("disk".into(), json!(spec.disk_gb));
     json!({
         "template": spec.template.as_deref().unwrap_or(TEMPLATE),
         "type": "vm",
