@@ -13,7 +13,7 @@ mod fake_agent37;
 
 use std::process::{Command, Stdio};
 
-use fake_agent37::FakeAgent37;
+use fake_agent37::{expected_host_key, FakeAgent37};
 use serde_json::{json, Value};
 
 /// Key the fake accepts.
@@ -133,19 +133,40 @@ fn expected_fields_are_repeated_exactly_with_name_host_key_and_host() {
     assert_eq!(lease["status"], "ready");
     assert_eq!(lease["ssh"]["user"], "root");
     assert_eq!(lease["ssh"]["host"], format!("{ID}.agent37.app"));
-    assert!(
-        lease["ssh"].get("hostKey").is_none(),
-        "hostKey in {}",
-        lease["ssh"]
-    );
+    assert_eq!(lease["ssh"]["hostKey"], expected_host_key(ID));
     assert_sent_no_creates_or_deletes(&fake);
 }
 
 #[test]
-fn running_instance_resolves_with_only_get_requests() {
+fn running_instance_resolves_with_gets_and_one_host_key_exec() {
     let fake = seeded();
     let out = run(&resolve(&fake, Some(&desired()), &json!({ "cloudId": ID })));
     assert_eq!(out.lease()["status"], "ready");
+    let non_get: Vec<String> = seen(&fake)
+        .into_iter()
+        .filter(|r| !r.starts_with("GET "))
+        .collect();
+    assert_eq!(non_get, [format!("POST /v1/instances/{ID}/exec")]);
+}
+
+#[test]
+fn running_instance_whose_host_key_cannot_be_read_fails_to_resolve() {
+    let fake = seeded();
+    fake.set_exec_fails(true);
+    let out = run(&resolve(&fake, Some(&desired()), &json!({ "cloudId": ID })));
+    assert_ne!(out.code, 0, "resolved without a host key: {}", out.stdout);
+    assert!(out.text().contains("host key"), "{}", out.text());
+}
+
+#[test]
+fn release_only_resolve_of_a_running_instance_skips_the_host_key() {
+    let fake = seeded();
+    let mut request = resolve(&fake, Some(&desired()), &json!({ "cloudId": ID }));
+    request["releaseOnly"] = json!(true);
+    let out = run(&request);
+    let lease = out.lease();
+    assert_eq!(lease["status"], "ready");
+    assert!(lease["ssh"].get("hostKey").is_none(), "{}", lease["ssh"]);
     let non_get: Vec<String> = seen(&fake)
         .into_iter()
         .filter(|r| !r.starts_with("GET "))
@@ -167,11 +188,7 @@ fn only_expected_derives_name_by_stripping_the_owner_prefix() {
     assert_eq!(lease["slug"], "blue-crab");
     assert_eq!(lease["name"], SHORT_NAME);
     assert_eq!(lease["cloudId"], ID);
-    assert!(
-        lease["ssh"].get("hostKey").is_none(),
-        "hostKey in {}",
-        lease["ssh"]
-    );
+    assert_eq!(lease["ssh"]["hostKey"], expected_host_key(ID));
     assert_sent_no_creates_or_deletes(&fake);
 }
 
@@ -186,11 +203,7 @@ fn desired_without_cloud_id_finds_the_instance_by_name() {
     assert_eq!(lease["name"], SHORT_NAME);
     assert_eq!(lease["status"], "ready");
     assert_eq!(lease["ssh"]["host"], format!("{ID}.agent37.app"));
-    assert!(
-        lease["ssh"].get("hostKey").is_none(),
-        "hostKey in {}",
-        lease["ssh"]
-    );
+    assert_eq!(lease["ssh"]["hostKey"], expected_host_key(ID));
     assert_sent_no_creates_or_deletes(&fake);
 }
 
