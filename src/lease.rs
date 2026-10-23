@@ -341,8 +341,11 @@ fn locate(
     Ok(instance)
 }
 
-/// Looks up the existing VM for a lease; never creates, deletes or execs.
-/// The host key is omitted: crabbox keeps the pin from acquire/resume.
+/// Looks up the existing VM for a lease; never creates or deletes.
+///
+/// A running VM's host key is read with one exec, because crabbox prints accept-new ssh
+/// options for a lease whose pin it does not hold locally, such as one acquired from another
+/// crabbox state dir.
 pub fn resolve(
     request: &Request,
     api: &dyn Agent37,
@@ -370,7 +373,12 @@ pub fn resolve(
     let stripped = full.strip_prefix(&prefix(&s.owner)).unwrap_or(full);
     let name = desired.map_or(stripped, |d| &d.name);
     let (status, host_key) = match status_of(&instance) {
-        "running" => ("ready", None),
+        "running" if request.release_only => ("ready", None),
+        "running" => {
+            let key = read_host_key(api, &instance.id)
+                .map_err(|e| format!("host key unavailable: {}", e.operator_message()))??;
+            ("ready", Some(key))
+        }
         "stopped" | "sleeping" => ("stopped", None),
         other => (other, None),
     };
