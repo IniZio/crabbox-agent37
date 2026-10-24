@@ -314,3 +314,6 @@ impl Plan {
         out
     }
 }
+
+#[cfg(test)]
+mod tests;

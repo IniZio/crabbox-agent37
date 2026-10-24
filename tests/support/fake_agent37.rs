@@ -16,6 +16,10 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
+#[path = "fake_cache.rs"]
+mod cache;
+#[allow(unused_imports, reason = "each test binary uses a different subset")]
+pub(crate) use cache::StartFault;
 #[path = "fake_scripts.rs"]
 mod scripts;
 #[allow(unused_imports, reason = "each test binary uses a different subset")]
@@ -101,6 +105,10 @@ struct State {
     create_fault: (Duration, Option<u16>),
     /// Docker data-root state per instance.
     docker_root: DockerRoot,
+    /// Scratch roots of the instances' filesystems, plus the guard directory.
+    boxes: tempfile::TempDir,
+    /// Rival acquires the cache tests stage.
+    rivals: cache::Rivals,
 }
 
 /// Handle to a running fake; the server thread lives until the test process exits.
@@ -137,7 +145,10 @@ impl FakeAgent37 {
             install_probes_left: 0,
             create_fault: (Duration::ZERO, None),
             docker_root: DockerRoot::default(),
+            boxes: tempfile::tempdir().unwrap(),
+            rivals: cache::Rivals::default(),
         }));
+        cache::guards(state.lock().unwrap().boxes.path());
         let shared = Arc::clone(&state);
         thread::spawn(move || {
             for stream in listener.incoming().flatten() {
@@ -307,6 +318,7 @@ impl FakeAgent37 {
     }
 
     /// Snapshot of every request received so far.
+    #[allow(dead_code, reason = "each test binary uses a different subset")]
     pub(crate) fn requests(&self) -> Vec<RecordedRequest> {
         self.lock().requests.clone()
     }
@@ -343,6 +355,7 @@ fn serve(stream: TcpStream, state: &Mutex<State>) {
     let Some(request) = read_request(&stream) else {
         return;
     };
+    cache::hold(state, &request.method, &request.path);
     let (status, body) = route(&request, state);
     if request.method == "POST" && request.path == "/v1/instances" {
         let delay = state.lock().unwrap().create_fault.0;
@@ -418,7 +431,7 @@ fn route(request: &RecordedRequest, state: &Mutex<State>) -> (u16, Value) {
         );
     }
     let path = request.path.split('?').next().unwrap_or_default();
-    match (request.method.as_str(), path) {
+    let answer = match (request.method.as_str(), path) {
         ("GET", "/v1/instances") => (200, json!({ "data": state.instances })),
         ("GET", "/v1/ssh-keys") => (200, json!({ "data": state.ssh_keys })),
         ("POST", "/v1/instances") => create_instance(&mut state, &request.body),
@@ -442,8 +455,13 @@ fn route(request: &RecordedRequest, state: &Mutex<State>) -> (u16, Value) {
             let id = path
                 .trim_start_matches("/v1/instances/")
                 .trim_end_matches("/start");
-            set_power(&mut state, id, true)
+            cache::start(&mut state, id).unwrap_or_else(|| set_power(&mut state, id, true))
         }
+        ("PATCH", _) if path.starts_with("/v1/instances/") => cache::patch(
+            &mut state,
+            path.trim_start_matches("/v1/instances/"),
+            &request.body,
+        ),
         ("DELETE", _) if path.starts_with("/v1/instances/") => {
             let id = path.trim_start_matches("/v1/instances/");
             let before = state.instances.len();
@@ -455,7 +473,9 @@ fn route(request: &RecordedRequest, state: &Mutex<State>) -> (u16, Value) {
             }
         }
         _ => (404, nested_error("not_found", "No such route.")),
-    }
+    };
+    cache::observe(&mut state, &request.method, path);
+    answer
 }
 
 /// Handles `POST /v1/instances`.
@@ -515,6 +535,9 @@ fn set_power(state: &mut State, id: &str, start: bool) -> (u16, Value) {
     };
     let status = if start { "running" } else { "stopped" };
     instance["status"] = json!(status);
+    if !start {
+        cache::stop(state, id);
+    }
     if start {
         *state.key_generations.entry(id.to_owned()).or_insert(0) += 1;
         state.docker_root.boot(id);
@@ -562,6 +585,8 @@ fn exec(state: &mut State, id: &str, body: &str) -> (u16, Value) {
         (200, tool_probe(state))
     } else if parsed["user"] == "root" && command.starts_with(": crabbox-tools-install; ") {
         (200, tool_install(state))
+    } else if parsed["user"] == "root" && command.starts_with(": crabbox-cache-") {
+        (200, cache::run_script(state, id, command))
     } else if parsed["user"] == "root" && command.starts_with(": crabbox-docker-root; ") {
         (200, state.docker_root.run(id))
     } else {
