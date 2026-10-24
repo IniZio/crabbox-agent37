@@ -1,0 +1,121 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    reason = "tests fail loudly on setup errors"
+)]
+
+use super::*;
+
+/// A request entry.
+fn req(group: &str, name: &str, paths: &[&str], sealed: bool) -> CacheVolumeRequest {
+    CacheVolumeRequest {
+        group: group.into(),
+        name: name.into(),
+        key: format!("{group}-{name}"),
+        paths: paths.iter().map(|p| (*p).to_owned()).collect(),
+        size_gb: 0,
+        sealed,
+    }
+}
+
+/// Shape with the given template.
+const fn shape(cpu: u32, template: Option<&str>) -> Shape<'_> {
+    Shape {
+        cpu,
+        memory_gb: 4,
+        disk_gb: 12,
+        template,
+    }
+}
+
+#[test]
+fn guest_paths_follow_the_allow_list() {
+    for ok in [
+        "~/.npm",
+        "~/.gradle/caches",
+        "/opt/sdk",
+        "/var/cache/apt",
+        "/var/lib/containerd",
+        "/var/lib/containers/storage",
+    ] {
+        assert!(GuestPath::parse(ok).is_ok(), "{ok}");
+    }
+    for bad in [
+        "~/.ssh",
+        "~/.ssh/keys",
+        "~/.crabbox-cache",
+        "~/.crabbox-cache/x",
+        "/opt",
+        "/var/cache",
+        "/etc/x",
+        "~/a/../b",
+        "relative",
+        "~/",
+    ] {
+        assert!(GuestPath::parse(bad).is_err(), "{bad}");
+    }
+    assert_eq!(GuestPath::parse("~/docker").unwrap().0, "/root/docker");
+}
+
+#[test]
+fn plan_skips_bad_and_duplicate_entries() {
+    let plan = Plan::new(&[
+        req("g1", "npm", &["~/.npm"], false),
+        req("g1", "npm", &["~/.other"], false),
+        req("g2", "again", &["~/.npm"], false),
+        req("g/1", "bad", &["~/.x"], false),
+        req("g1", "ssh", &["~/.ssh"], false),
+    ]);
+    let echo = plan.echo(&[], None);
+    let outcomes: Vec<(&str, &str)> = echo
+        .iter()
+        .map(|e| (e.name.as_str(), e.outcome.as_str()))
+        .collect();
+    assert_eq!(
+        outcomes,
+        [
+            ("npm", "empty"),
+            ("npm", "skipped"),
+            ("again", "skipped"),
+            ("bad", "skipped"),
+            ("ssh", "skipped"),
+        ]
+    );
+}
+
+#[test]
+fn seed_key_covers_groups_shape_and_template() {
+    let a = Plan::new(&[
+        req("g1", "npm", &["~/.npm"], false),
+        req("g2x", "docker", &["~/docker"], true),
+    ]);
+    let b = Plan::new(&[
+        req("g2x", "docker", &["~/docker"], true),
+        req("g1", "yarn", &["~/.cache/yarn"], false),
+    ]);
+    let base = a.key(&shape(2, None));
+    assert_eq!(base.len(), 16);
+    assert_eq!(
+        base,
+        b.key(&shape(2, None)),
+        "names and order do not matter"
+    );
+    assert_ne!(base, a.key(&shape(4, None)));
+    assert_ne!(base, a.key(&shape(2, Some("custom"))));
+    let fewer = Plan::new(&[req("g1", "npm", &["~/.npm"], false)]);
+    assert_ne!(base, fewer.key(&shape(2, None)));
+}
+
+#[test]
+fn echo_marks_restored_names_with_the_generation() {
+    let plan = Plan::new(&[
+        req("g1", "npm", &["~/.npm"], false),
+        req("g1", "yarn", &["~/.cache/yarn"], false),
+    ]);
+    let echo = plan.echo(&["npm".to_owned()], Some("1700000000"));
+    assert_eq!(
+        (echo[0].outcome.as_str(), echo[0].detail.as_str()),
+        ("restored", "gen 1700000000")
+    );
+    assert_eq!(echo[1].outcome, "empty");
+}

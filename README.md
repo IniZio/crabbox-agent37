@@ -81,6 +81,8 @@ Do not put the key in crabbox config. One team key is held on the controller hos
 | `template` | Template to create VMs from: a workspace template name or an `agent37-` system template. Non-empty string. Default `agent37-ubuntu`. Env `CRABBOX_AGENT37_TEMPLATE` overrides it. |
 | `diskGb` | Disk size in GB, sent as `resources.disk`. Whole number from 2 up to 12, 20, 40 or 80 for the standard, fast, large or beast class. Default: that maximum. Env `CRABBOX_AGENT37_DISK_GB` overrides it. See Disk below. |
 | `sshKey` | Path to the private SSH key. `<sshKey>.pub` must be registered with the workspace. |
+| `cache.ttlDays` | Days a cache seed is kept. Whole number. Default 7. |
+| `cache.maxSeeds` | Cache seeds kept per owner, newest first. Whole number. Default 10. |
 
 ## Rules
 
@@ -114,6 +116,17 @@ The disk is created at the class maximum unless `diskGb` says otherwise. Disk bi
 
 agent37 can grow a disk later (`POST /v1/instances/{id}/resize`). On a VM every resize is a cold boot that ends every process on the Box, so the adapter never resizes a running VM. The filesystem at `/root` grows into the new space on that boot and its data is kept. A future option, not built: resize a stopped VM before `resume` starts it, since that boot happens anyway.
 
+## Cache volumes
+
+With `external.capabilities.cacheVolumes: true` in trusted user config, crabbox sends `desired.cacheVolumes` on acquire, and a released Box becomes the cache of the next one.
+
+- Each volume's data lives on the billed disk at `/root/.crabbox-cache/<group>/<name>/<path>`. Every declared path is a symlink to it. A VM has no systemd and ignores fstab, and bind mounts are lost on reboot, but symlinks survive a stop and start. agent37's init bind-mounts `/root/docker` at boot and follows the symlink.
+- `release` of a running Box with cache volumes keeps it as a seed. For each sealed volume that lacks `.crabbox-sealed` in any of its paths, it empties that volume. It removes everything under `/root` except `.crabbox-cache`, `.ssh` and the links into the store. Then it stops the Box, renames it `crabbox-<owner>--seed.<generation>`, and deletes older seeds with the same key. Outside `/root` the disk is kept as it is. If any step fails, the Box is deleted and release still succeeds.
+- The seed key is the sorted set of groups plus the VM's cpu, memory, disk and template. `acquire` with cache volumes and no VM for the lease claims the newest stopped seed of its key and starts it. It clears the seal markers and links any new volume. It echoes `restored` for volumes the seed held and `empty` for the rest. A cold Box echoes `empty`, and a volume the request got wrong echoes `skipped`.
+- agent37 has no conditional write. A claim renames the seed and rewrites its metadata to the new lease with `PATCH /v1/instances/{id}`, then reads the instance again and keeps it only if the new lease is still there. A lock file in the temp dir serialises claims on one host. An acquire that loses a claim creates a cold Box. A claimed seed that fails to start or to set up is deleted, and acquire creates a cold Box.
+- agent37 merges `PATCH`ed metadata into the stored keys, whatever its docs say. So `crabbox_role` (`seed` or `lease`) is what tells a seed apart. `list`, `resolve`, `release` and name lookups never see a seed. `cleanup` deletes seeds older than `cache.ttlDays` and those beyond the newest `cache.maxSeeds`.
+- A stopped seed bills disk only.
+
 ## Sleep
 
 agent37 auto-sleep stays off: the adapter creates instances with auto-sleep disabled. moor sleeps the Box with `crabbox pause` and wakes it with `crabbox resume`. Resume is a cold boot. The host key may change, and crabbox pins the new one.
@@ -129,9 +142,9 @@ agent37 auto-sleep stays off: the adapter creates instances with auto-sleep disa
 - `acquire` finds or creates the VM for the lease, waits until it runs and accepts exec, and returns the lease with the VM's SSH host key. If acquire fails after it created a VM, it deletes that VM, even when crabbox asked to keep it. Keep applies only to a lease that acquire returned. It never deletes a VM it did not create in that call. It never starts a stopped VM. On a stopped instance it fails with "instance <id> is stopped; run crabbox resume".
 - `resolve` looks up the existing VM for a lease and returns it. It never creates or deletes. It reports a stopped lease without reading its host key, which is what crabbox needs before `pause` and `resume`.
 - `list` returns this owner's VM leases, sorted by name, then cloud id.
-- `release` deletes the requested instance after checking it matches the lease. An instance that is already gone counts as released.
+- `release` deletes the requested instance after checking it matches the lease. A running Box with cache volumes is kept as a seed instead (see Cache volumes). An instance that is already gone counts as released.
 - `touch` succeeds and does nothing.
-- `cleanup` deletes this owner's instances that `list` cannot report, such as one left by an interrupted acquire.
+- `cleanup` deletes this owner's instances that `list` cannot report, such as one left by an interrupted acquire, and expired or surplus cache seeds.
 - `pause` stops the instance and returns once it reports stopped. On an already stopped instance it succeeds without calling the API.
 - `resume` starts the instance (a cold boot), waits for running and for the VM to accept exec and ssh, and returns the lease with a freshly read SSH host key. The key can change when agent37 moves the instance to another host. On an already running instance it does not call start.
 - `pause` and `resume` wait at most `readyTimeoutSeconds`. crabbox sends them only when `external.capabilities.pauseResume: true` is set in trusted user config.

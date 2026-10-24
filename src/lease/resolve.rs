@@ -42,6 +42,9 @@ fn locate(
     {
         return Err(format!("instance {cloud_id} belongs to another owner"));
     }
+    if crate::cache::is_seed(&instance) {
+        return Err(format!("instance {cloud_id} not found"));
+    }
     if let Some(name) = derived {
         let found = find_by_name(api, &name)?.map(|i| i.id);
         if found.as_deref() != Some(cloud_id) {
