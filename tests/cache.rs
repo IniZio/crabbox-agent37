@@ -11,6 +11,8 @@
 #[path = "support/fake_agent37.rs"]
 mod fake_agent37;
 
+use std::fs::Permissions;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -244,20 +246,24 @@ fn release_empties_an_unsealed_sealed_volume_and_strips_root() {
     let root = fake.box_root(lease["cloudId"].as_str().unwrap());
     std::fs::write(store(&root, NPM).join("pkg.tgz"), "npm data").unwrap();
     std::fs::write(store(&root, DOCKER).join("image"), "unsealed").unwrap();
-    for dir in ["root/work", "root/.ssh", "root/.config"] {
+    for dir in ["root/work", "root/.ssh", "root/.agent37", "root/mnt/x"] {
         std::fs::create_dir_all(root.join(dir)).unwrap();
     }
     std::fs::write(root.join("root/.ssh/authorized_keys"), "key").unwrap();
     std::fs::write(root.join("root/.bashrc"), "x").unwrap();
+    let mnt = root.join("root/mnt");
+    std::fs::write(root.join(".mounts"), mnt.display().to_string()).unwrap();
     assert_eq!(release(&fake, &lease), 0);
+    assert_eq!(instance(&fake, &lease["cloudId"])["status"], "stopped");
     assert_eq!(entries(&store(&root, DOCKER)), Vec::<String>::new());
     assert!(store(&root, NPM).join("pkg.tgz").exists());
     assert_eq!(
-        entries(&root.join("root")),
-        [".crabbox-cache", ".npm", ".ssh", "docker"],
-        "only the store, .ssh and the links into the store stay"
+        entries(&root.join("root")).join(" "),
+        ".agent37 .crabbox-cache .npm .ssh docker mnt",
+        "the store, .ssh, .agent37, the links into the store and mount points stay"
     );
     assert!(root.join("root/.ssh/authorized_keys").exists());
+    assert_eq!(entries(&mnt), Vec::<String>::new());
 }
 
 #[test]
@@ -267,6 +273,15 @@ fn a_failed_seeding_deletes_the_box_and_release_succeeds() {
     fake.set_exec_fails(true);
     assert_eq!(release(&fake, &lease), 0);
     assert_eq!(instance(&fake, &lease["cloudId"]), Value::Null);
+    fake.set_exec_fails(false);
+    let lease = acquire(&fake, 2, "standard");
+    let root = fake.box_root(lease["cloudId"].as_str().unwrap());
+    let held = root.join("root/work");
+    std::fs::create_dir_all(held.join("f")).unwrap();
+    std::fs::set_permissions(&held, Permissions::from_mode(0o500)).unwrap();
+    let code = release(&fake, &lease);
+    std::fs::set_permissions(&held, Permissions::from_mode(0o700)).unwrap();
+    assert_eq!((code, instance(&fake, &lease["cloudId"])), (0, Value::Null));
 }
 
 #[test]

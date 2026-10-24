@@ -2,9 +2,10 @@
 //!
 //! A script's `P=;` becomes `P=<root>;`, so every path it touches lands under that root. A
 //! guard directory first on `PATH` stands in for `docker`, `sudo`, `apt-get`, `systemctl` and
-//! `pidof`, which fail, and for `mountpoint`, `umount` and `fsfreeze`, which act on files in
-//! the root: `.mounts` lists the paths that are mount points, `.unmounted` and `.frozen` record
-//! calls. No script reaches the host's daemons, mounts or package manager.
+//! `pidof`, which fail, and for `mountpoint`, `umount`, `rm` and `fsfreeze`, which act on files
+//! in the root: `.mounts` lists the paths that are mount points, which `rm` refuses as busy,
+//! and `.unmounted` and `.frozen` record calls. No script reaches the host's daemons, mounts or
+//! package manager.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -20,7 +21,7 @@ use super::{nested_error, FakeAgent37, State};
 const GUARDED: [&str; 5] = ["docker", "sudo", "apt-get", "systemctl", "pidof"];
 
 /// `(command, script)` of the stand-ins that act on the instance root `$FAKE_BOX`.
-const STAND_INS: [(&str, &str); 3] = [
+const STAND_INS: [(&str, &str); 4] = [
     (
         "mountpoint",
         r#"[ "$1" = -q ] && shift; grep -qxF "$1" "$FAKE_BOX/.mounts" 2>/dev/null"#,
@@ -28,6 +29,10 @@ const STAND_INS: [(&str, &str); 3] = [
     (
         "umount",
         r#"[ "$1" = -l ] && shift; echo "$1" >> "$FAKE_BOX/.unmounted"; grep -vxF "$1" "$FAKE_BOX/.mounts" > "$FAKE_BOX/.mounts.new"; mv "$FAKE_BOX/.mounts.new" "$FAKE_BOX/.mounts""#,
+    ),
+    (
+        "rm",
+        r#"for a; do if grep -qxF -- "$a" "$FAKE_BOX/.mounts" 2>/dev/null; then echo "rm: cannot remove '$a': Device or resource busy" >&2; exit 1; fi; done; exec /bin/rm "$@""#,
     ),
     ("fsfreeze", r#"echo "$*" >> "$FAKE_BOX/.frozen""#),
 ];
