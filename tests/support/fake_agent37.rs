@@ -105,8 +105,8 @@ struct State {
     docker_root: DockerRoot,
     /// Scratch roots of the instances' filesystems, plus the guard directory.
     boxes: tempfile::TempDir,
-    /// Whether a rival claims each seed right after this adapter does.
-    steal_claims: bool,
+    /// Rival acquires the cache tests stage.
+    rivals: cache::Rivals,
 }
 
 /// Handle to a running fake; the server thread lives until the test process exits.
@@ -144,7 +144,7 @@ impl FakeAgent37 {
             create_fault: (Duration::ZERO, None),
             docker_root: DockerRoot::default(),
             boxes: tempfile::tempdir().unwrap(),
-            steal_claims: false,
+            rivals: cache::Rivals::default(),
         }));
         cache::guards(state.lock().unwrap().boxes.path());
         let shared = Arc::clone(&state);
@@ -353,6 +353,7 @@ fn serve(stream: TcpStream, state: &Mutex<State>) {
     let Some(request) = read_request(&stream) else {
         return;
     };
+    cache::hold(state, &request.method, &request.path);
     let (status, body) = route(&request, state);
     if request.method == "POST" && request.path == "/v1/instances" {
         let delay = state.lock().unwrap().create_fault.0;
@@ -428,7 +429,7 @@ fn route(request: &RecordedRequest, state: &Mutex<State>) -> (u16, Value) {
         );
     }
     let path = request.path.split('?').next().unwrap_or_default();
-    match (request.method.as_str(), path) {
+    let answer = match (request.method.as_str(), path) {
         ("GET", "/v1/instances") => (200, json!({ "data": state.instances })),
         ("GET", "/v1/ssh-keys") => (200, json!({ "data": state.ssh_keys })),
         ("POST", "/v1/instances") => create_instance(&mut state, &request.body),
@@ -470,7 +471,9 @@ fn route(request: &RecordedRequest, state: &Mutex<State>) -> (u16, Value) {
             }
         }
         _ => (404, nested_error("not_found", "No such route.")),
-    }
+    };
+    cache::observe(&mut state, &request.method, path);
+    answer
 }
 
 /// Handles `POST /v1/instances`.
@@ -530,6 +533,9 @@ fn set_power(state: &mut State, id: &str, start: bool) -> (u16, Value) {
     };
     let status = if start { "running" } else { "stopped" };
     instance["status"] = json!(status);
+    if !start {
+        cache::stop(state, id);
+    }
     if start {
         *state.key_generations.entry(id.to_owned()).or_insert(0) += 1;
         state.docker_root.boot(id);
