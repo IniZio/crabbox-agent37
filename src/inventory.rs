@@ -155,31 +155,36 @@ pub fn release(request: &Request, api: &dyn Agent37) -> Result<(), String> {
 ///
 /// crabbox can never release an instance with no lease id, slug or name; an interrupted
 /// acquire or manual create leaves them. A seed past `cache.ttlDays` or beyond the newest
-/// `cache.maxSeeds` goes too.
+/// `cache.maxSeeds` goes too, if a fresh read still shows it a stopped seed.
 ///
 /// # Errors
 /// Returns the operator message when config or an API call fails.
 pub fn cleanup(request: &Request, api: &dyn Agent37) -> Result<String, String> {
     let owner = settings(&request.config)?.owner;
     let instances = api.list_instances().map_err(|e| e.operator_message())?;
-    let mut ids: Vec<&str> = instances
+    let mut ids: Vec<String> = instances
         .iter()
         .filter(|i| unlistable(i, &owner))
-        .map(|i| i.id.as_str())
-        .chain(crate::cache::gc(&instances, &owner, &request.config)?)
+        .map(|i| i.id.clone())
         .collect();
-    ids.sort_unstable();
-    if ids.is_empty() {
+    let seeds: Vec<String> = crate::cache::gc(&instances, &owner, &request.config)?
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    if ids.is_empty() && seeds.is_empty() {
         return Ok("nothing to clean up".to_owned());
     }
     let verb = if request.dry_run {
+        ids.extend(seeds);
         "would delete"
     } else {
         for id in &ids {
             tolerate_missing(api.delete_instance(id))?;
         }
+        ids.extend(crate::cache::delete_seeds(api, &owner, &seeds, None));
         "deleted"
     };
+    ids.sort_unstable();
     Ok(format!(
         "{verb} {} instance(s): {}",
         ids.len(),

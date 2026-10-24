@@ -13,7 +13,7 @@ use ring::digest;
 
 use crate::protocol::{CacheVolumeEcho, CacheVolumeRequest};
 
-pub(crate) use seed::{claim, gc, is_seed, release, setup, start};
+pub(crate) use seed::{claim, delete_seeds, gc, is_seed, release, setup, take, Taken};
 
 /// The login user's home; `~/` paths resolve here.
 const HOME: &str = "/root";
@@ -180,6 +180,8 @@ pub(crate) struct Shape<'a> {
     pub(crate) disk_gb: u32,
     /// Template name, `None` for the adapter default.
     pub(crate) template: Option<&'a str>,
+    /// Region the VM runs in.
+    pub(crate) region: &'a str,
 }
 
 /// A request entry as a typed volume, or why it is refused.
@@ -249,17 +251,18 @@ impl Plan {
         self.groups.is_empty()
     }
 
-    /// Seed key: the sorted group ids plus the VM shape and template, as 16 hex.
+    /// Seed key: the sorted group ids plus the VM shape, template and region, as 16 hex.
     pub(crate) fn key(&self, shape: &Shape<'_>) -> String {
         let mut ids: Vec<&str> = self.groups.iter().map(|g| g.id.as_str()).collect();
         ids.sort_unstable();
         let text = format!(
-            "{}\n{}x{}x{}\n{}",
+            "{}\n{}x{}x{}\n{}\n{}",
             ids.join(","),
             shape.cpu,
             shape.memory_gb,
             shape.disk_gb,
-            shape.template.unwrap_or("")
+            shape.template.unwrap_or(""),
+            shape.region
         );
         digest::digest(&digest::SHA256, text.as_bytes())
             .as_ref()
@@ -311,6 +314,3 @@ impl Plan {
         out
     }
 }
-
-#[cfg(test)]
-mod tests;

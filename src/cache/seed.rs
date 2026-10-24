@@ -1,8 +1,10 @@
 //! Seeds: stopped Boxes kept after release, claimed by the next acquire of the same key.
 //!
-//! agent37 has no conditional write. A claim is `PATCH` of the seed's name and metadata to the
-//! new lease, then a fresh `GET` that must still show this lease; a host-wide file lock
-//! serialises claims from one host. A seed is renamed so no lease name ever points at it.
+//! agent37 has no conditional write. A claim first `PATCH`es the seed's name and metadata to
+//! the new lease and reads it back, under a host-wide file lock; that alone lets two hosts
+//! both win. The started Box then settles it: [`script::claim`] makes a link on its tmpfs that
+//! only one lease can create, and the winner writes its lease again. A seed is renamed so no
+//! lease name ever points at it.
 
 use std::fs::File;
 use std::io::Write;
@@ -14,7 +16,7 @@ use super::{script, Plan};
 use crate::agent37::{Agent37, Instance};
 use crate::docker_root::{reboot, wait_for};
 use crate::inventory::owned;
-use crate::lease::{prefix, status_of};
+use crate::lease::{pause, prefix, status_of};
 use crate::protocol::{CacheVolumeEcho, Desired};
 
 /// `seed` on a seed, `lease` on a lease made with cache volumes. agent37 merges `PATCH`ed
@@ -32,9 +34,19 @@ const TTL_DAYS: u64 = 7;
 /// Seeds kept per owner when the config sets no `cache.maxSeeds`.
 const MAX_SEEDS: u64 = 10;
 
-/// True for a stopped Box kept as a seed.
+/// True for a Box kept as a seed.
 pub(crate) fn is_seed(instance: &Instance) -> bool {
     instance.meta(ROLE) == Some("seed")
+}
+
+/// True for a stopped seed VM of `owner`, of `key` when one is given: the only Box a claim
+/// takes or a cleanup deletes.
+fn stopped_seed(instance: &Instance, owner: &str, key: Option<&str>) -> bool {
+    owned(instance, owner)
+        && is_seed(instance)
+        && key.is_none_or(|k| instance.meta(KEY) == Some(k))
+        && instance.kind.as_deref() == Some("vm")
+        && status_of(instance) == "stopped"
 }
 
 /// A seed's generation; unreadable sorts oldest.
@@ -85,7 +97,8 @@ fn lock(owner: &str) -> Option<File> {
 }
 
 /// Claims the newest stopped seed of `key` for the lease named `name`; `None` means create
-/// cold. The returned instance already carries the lease's name and metadata.
+/// cold. The returned instance already carries the lease's name and metadata, but another
+/// host may hold it too until [`take`] settles it. Without the host lock it goes cold.
 pub(crate) fn claim(
     api: &dyn Agent37,
     owner: &str,
@@ -94,21 +107,20 @@ pub(crate) fn claim(
     (plan, key): (&Plan, &str),
     diag: &mut dyn Write,
 ) -> Option<Instance> {
-    let _guard = lock(owner);
+    let Some(_guard) = lock(owner) else {
+        let _ = writeln!(diag, "acquire: no claim lock; creating cold");
+        return None;
+    };
     let seed = api
         .list_instances()
         .ok()?
         .into_iter()
-        .filter(|i| owned(i, owner) && is_seed(i) && i.meta(KEY) == Some(key))
-        .filter(|i| i.kind.as_deref() == Some("vm") && status_of(i) == "stopped")
+        .filter(|i| stopped_seed(i, owner, Some(key)))
         .max_by_key(|i| (generation(i), i.id.clone()))?;
     let gen = seed.meta(GEN).unwrap_or("0").to_owned();
     let meta = lease_metadata(owner, desired, plan, key, Some(&gen));
-    let patched = api.patch_instance(&seed.id, name, &meta).ok()?;
-    let now = api.get_instance(&seed.id).unwrap_or(patched);
-    let won = now.name.as_deref() == Some(name)
-        && now.meta("crabbox_lease_id") == Some(desired.lease_id.as_str())
-        && !is_seed(&now);
+    let now = write_lease(api, &seed.id, name, &meta)?;
+    let won = holds(&now, name, desired);
     let _ = if won {
         writeln!(diag, "acquire: claimed seed {} (gen {gen})", now.id)
     } else {
@@ -117,10 +129,70 @@ pub(crate) fn claim(
     won.then_some(now)
 }
 
-/// Starts a claimed seed and waits until it runs.
-pub(crate) fn start(api: &dyn Agent37, id: &str, deadline: Instant) -> Result<(), String> {
-    api.start_instance(id).map_err(|e| e.operator_message())?;
-    wait_for(api, id, &["running"], deadline)
+/// `PATCH`es the lease's name and metadata onto `id`, then reads it back.
+fn write_lease(
+    api: &dyn Agent37,
+    id: &str,
+    name: &str,
+    meta: &[(String, String)],
+) -> Option<Instance> {
+    let patched = api.patch_instance(id, name, meta).ok()?;
+    Some(api.get_instance(id).unwrap_or(patched))
+}
+
+/// True when `instance` carries the lease's name and id and is no longer a seed.
+fn holds(instance: &Instance, name: &str, desired: &Desired) -> bool {
+    instance.name.as_deref() == Some(name)
+        && instance.meta("crabbox_lease_id") == Some(desired.lease_id.as_str())
+        && !is_seed(instance)
+}
+
+/// What starting a claimed seed came to.
+pub(crate) enum Taken {
+    /// It runs and is this lease's alone.
+    Ours(Instance),
+    /// Another lease claimed it inside the Box first; it is theirs and left alone.
+    Lost,
+    /// It failed before this lease could claim it inside the Box; it is left alone.
+    Failed(String),
+}
+
+/// Starts a claimed seed and claims it inside the Box. The winner writes its lease again,
+/// over any rival's `PATCH`, and reads it back; `Err` means the Box is this lease's but
+/// unusable.
+pub(crate) fn take(
+    api: &dyn Agent37,
+    seed: &Instance,
+    (owner, desired, name): (&str, &Desired, &str),
+    (plan, key): (&Plan, &str),
+    deadline: Instant,
+) -> Result<Taken, String> {
+    let id = &seed.id;
+    let started = api.start_instance(id);
+    if let Err(err) = wait_for(api, id, &["running"], deadline) {
+        let why = started.err().map_or(err, |e| e.operator_message());
+        return Ok(Taken::Failed(why));
+    }
+    let command = script::claim(&desired.lease_id);
+    let holder = loop {
+        match api.exec_as_root(id, &command) {
+            Ok(out) if out.exit_code == 0 => break out.stdout.trim().to_owned(),
+            _ if pause(deadline) => {}
+            _ => {
+                return Ok(Taken::Failed(format!(
+                    "claiming {id} inside the Box failed"
+                )))
+            }
+        }
+    };
+    if holder != desired.lease_id {
+        return Ok(Taken::Lost);
+    }
+    let meta = lease_metadata(owner, desired, plan, key, seed.meta(GEN));
+    match write_lease(api, id, name, &meta) {
+        Some(now) if holds(&now, name, desired) => Ok(Taken::Ours(now)),
+        _ => Err(format!("{id} does not carry this lease after its claim")),
+    }
 }
 
 /// Links every planned volume on running `instance` and records the lease's cache metadata.
@@ -192,16 +264,14 @@ fn make_seed(
     .collect();
     api.patch_instance(id, &format!("{}seed.{gen}", prefix(owner)), &meta)
         .map_err(|e| e.operator_message())?;
-    let older = api.list_instances().unwrap_or_default();
-    for old in older.iter().filter(|i| {
-        owned(i, owner)
-            && is_seed(i)
-            && i.meta(KEY) == Some(key)
-            && status_of(i) == "stopped"
-            && (generation(i), &i.id) < (gen, id)
-    }) {
-        let _ = api.delete_instance(&old.id);
-    }
+    let older: Vec<String> = api
+        .list_instances()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|i| stopped_seed(i, owner, Some(key)) && (generation(i), &i.id) < (gen, id))
+        .map(|i| i.id)
+        .collect();
+    delete_seeds(api, owner, &older, Some(key));
     Ok(())
 }
 
@@ -233,6 +303,29 @@ fn limit(config: &Value, field: &str, default: u64) -> Result<u64, String> {
     }
 }
 
+/// Deletes each of `ids` that a fresh read under the host claim lock still shows as a
+/// stopped seed of `owner` (and of `key` when given); returns the ids deleted. A claim
+/// renames a seed before it starts it, so a Box being claimed is never deleted. Without the
+/// lock nothing is deleted.
+pub(crate) fn delete_seeds(
+    api: &dyn Agent37,
+    owner: &str,
+    ids: &[String],
+    key: Option<&str>,
+) -> Vec<String> {
+    let Some(_guard) = lock(owner) else {
+        return Vec::new();
+    };
+    ids.iter()
+        .filter(|id| {
+            api.get_instance(id)
+                .is_ok_and(|now| stopped_seed(&now, owner, key))
+                && api.delete_instance(id).is_ok()
+        })
+        .cloned()
+        .collect()
+}
+
 /// Ids of this owner's seeds past `cache.ttlDays` or beyond the newest `cache.maxSeeds`.
 pub(crate) fn gc<'a>(
     instances: &'a [Instance],
@@ -243,7 +336,7 @@ pub(crate) fn gc<'a>(
     let max = usize::try_from(limit(config, "maxSeeds", MAX_SEEDS)?).unwrap_or(usize::MAX);
     let mut seeds: Vec<&Instance> = instances
         .iter()
-        .filter(|i| owned(i, owner) && is_seed(i))
+        .filter(|i| stopped_seed(i, owner, None))
         .collect();
     seeds.sort_by_key(|i| std::cmp::Reverse((generation(i), i.id.clone())));
     let cutoff = now().saturating_sub(ttl);
