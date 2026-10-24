@@ -1,8 +1,9 @@
 //! Cache volumes on agent37: the released Box itself becomes the seed of the next one.
 //!
-//! A group's data lives on the billed disk at `/root/.crabbox-cache/<group>/<name>/<path>`,
-//! and every declared path is a symlink to it: a VM has no systemd, ignores fstab and loses
-//! bind mounts on reboot, while symlinks survive a stop and start.
+//! A group's data lives on the billed disk at
+//! `/root/.crabbox-cache/<group>/<name>/<slug>-<hash>`, and every declared path is a symlink to
+//! it: a VM has no systemd, ignores fstab and loses bind mounts on reboot, while symlinks
+//! survive a stop and start.
 
 mod script;
 mod seed;
@@ -56,7 +57,12 @@ impl Token {
 
 /// A guest path, resolved against [`HOME`] when given as `~/<rel>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct GuestPath(String);
+struct GuestPath {
+    /// Absolute path in the guest.
+    abs: String,
+    /// The path as the request wrote it; its data dir name derives from this.
+    written: String,
+}
 
 impl GuestPath {
     /// Parses `~/<rel>` (not `~/.ssh` or the store), `/opt/<rel>`, `/var/cache/<rel>`, or
@@ -96,11 +102,15 @@ impl GuestPath {
                     .to_owned(),
             );
         }
-        Ok(Self(if home {
+        let abs = if home {
             format!("{HOME}/{rest}")
         } else {
             s.to_owned()
-        }))
+        };
+        Ok(Self {
+            abs,
+            written: s.to_owned(),
+        })
     }
 }
 
@@ -135,30 +145,40 @@ impl Group {
                     "{}/{}/{}",
                     self.id.as_str(),
                     volume.name.as_str(),
-                    escape_path(&p.0)
+                    data_dir_name(&p.written)
                 );
-                (p.0.as_str(), dir)
+                (p.abs.as_str(), dir)
             })
             .collect()
     }
 }
 
-/// `systemd-escape --path`: `/` becomes `-`, other bytes outside `[A-Za-z0-9:_.]`
-/// (and a leading `.`) become `\xNN`.
-fn escape_path(path: &str) -> String {
-    let trimmed = path.trim_matches('/');
-    let mut out = String::new();
-    for (i, b) in trimmed.bytes().enumerate() {
-        match b {
-            b'/' => out.push('-'),
-            b'.' if i > 0 => out.push('.'),
-            b if b.is_ascii_alphanumeric() || b == b':' || b == b'_' => out.push(char::from(b)),
-            b => {
-                let _ = write!(out, "\\x{b:02x}");
-            }
-        }
-    }
-    out
+/// Data dir name of a guest path as written: a readable, never hidden slug plus 8 hex chars
+/// of its SHA-256. Tools resolve symlinks, so the name must be a plain path segment, and two
+/// paths whose slugs agree (`/opt/a-b`, `/opt/a/b`) still get different names.
+fn data_dir_name(written: &str) -> String {
+    let slug: String = written
+        .chars()
+        .filter_map(|c| match c {
+            '/' => Some('-'),
+            c if c.is_ascii_alphanumeric() || "._-".contains(c) => Some(c),
+            _ => None,
+        })
+        .collect();
+    let slug = slug.trim_start_matches(['-', '.']).trim_end_matches('-');
+    format!("{slug}-{}", sha256_hex(written, 4))
+}
+
+/// Lowercase hex of the first `bytes` bytes of the SHA-256 of `text`.
+fn sha256_hex(text: &str, bytes: usize) -> String {
+    digest::digest(&digest::SHA256, text.as_bytes())
+        .as_ref()
+        .iter()
+        .take(bytes)
+        .fold(String::new(), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        })
 }
 
 /// The groups a lease gets, plus the requested names that were refused.
@@ -264,14 +284,7 @@ impl Plan {
             shape.template.unwrap_or(""),
             shape.region
         );
-        digest::digest(&digest::SHA256, text.as_bytes())
-            .as_ref()
-            .iter()
-            .take(8)
-            .fold(String::new(), |mut s, b| {
-                let _ = write!(s, "{b:02x}");
-                s
-            })
+        sha256_hex(&text, 8)
     }
 
     /// Echo of every requested name: `restored` names came from seed generation `generation`.
