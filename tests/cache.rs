@@ -23,9 +23,9 @@ use serde_json::{json, Value};
 /// Key the fake accepts.
 const KEY: &str = "sk_test_fake";
 /// Data dir of the npm volume, relative to the store.
-const NPM: &str = "g1/npm/root-.npm";
+const NPM: &str = "g1/npm/npm-82ec3afe";
 /// Data dir of the docker volume's `~/docker` path, relative to the store.
-const DOCKER: &str = "g1x/docker/root-docker";
+const DOCKER: &str = "g1x/docker/docker-784af2d5";
 
 /// Runs the binary with `request`; returns the exit code and parsed stdout.
 fn run(request: &Value) -> (i32, Value) {
@@ -153,7 +153,10 @@ fn entries(dir: &Path) -> Vec<String> {
 fn seal_docker(root: &Path) {
     std::fs::write(store(root, DOCKER).join(".crabbox-sealed"), "").unwrap();
     std::fs::write(
-        store(root, "g1x/docker/var-lib-containerd/.crabbox-sealed"),
+        store(
+            root,
+            "g1x/docker/var-lib-containerd-399dacdf/.crabbox-sealed",
+        ),
         "",
     )
     .unwrap();
@@ -171,7 +174,7 @@ fn cold_acquire_links_every_path_and_echoes_empty() {
     );
     assert_eq!(
         std::fs::read_link(root.join("var/lib/containerd")).unwrap(),
-        store(&root, "g1x/docker/var-lib-containerd")
+        store(&root, "g1x/docker/var-lib-containerd-399dacdf")
     );
     let daemon = std::fs::read_to_string(root.join("etc/docker/daemon.json")).unwrap();
     assert!(daemon.contains("/root/docker"), "{daemon}");

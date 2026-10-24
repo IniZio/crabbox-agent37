@@ -55,7 +55,49 @@ fn guest_paths_follow_the_allow_list() {
     ] {
         assert!(GuestPath::parse(bad).is_err(), "{bad}");
     }
-    assert_eq!(GuestPath::parse("~/docker").unwrap().0, "/root/docker");
+    assert_eq!(GuestPath::parse("~/docker").unwrap().abs, "/root/docker");
+}
+
+#[test]
+fn data_dir_names_are_plain_segments() {
+    assert_eq!(
+        data_dir_name("/opt/android-sdk"),
+        "opt-android-sdk-aa51df94"
+    );
+    assert_eq!(
+        data_dir_name("~/.cache/go-build"),
+        "cache-go-build-8859d6e1"
+    );
+    let (dashed, nested) = (data_dir_name("/opt/a-b"), data_dir_name("/opt/a/b"));
+    assert!(
+        dashed.starts_with("opt-a-b-") && nested.starts_with("opt-a-b-"),
+        "the slugs agree"
+    );
+    assert_ne!(dashed, nested, "the hash separates them");
+    let presets = [
+        "~/.cache/npm",
+        "~/.cache/yarn",
+        "~/.local/share/pnpm/store",
+        "~/.bun/install/cache",
+        "~/docker",
+        "/var/lib/containerd",
+        "~/.local/share/containers",
+        "~/.gradle/caches",
+        "~/.gradle/wrapper",
+        "~/.pub-cache",
+        "~/.cargo/registry",
+        "~/.cargo/git",
+        "~/.rustup",
+        "~/go/pkg/mod",
+        "~/.cache/go-build",
+    ];
+    for path in presets {
+        let name = data_dir_name(path);
+        let plain = name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b));
+        assert!(plain && !name.starts_with('.'), "{path} -> {name}");
+    }
 }
 
 #[test]
