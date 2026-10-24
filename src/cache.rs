@@ -13,7 +13,7 @@ use ring::digest;
 
 use crate::protocol::{CacheVolumeEcho, CacheVolumeRequest};
 
-pub(crate) use seed::{claim, delete_seeds, gc, is_seed, release, setup, take, Taken};
+pub(crate) use seed::{claim, delete_seeds, gc, is_lease, is_seed, release, setup, take, Taken};
 
 /// The login user's home; `~/` paths resolve here.
 const HOME: &str = "/root";
