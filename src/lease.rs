@@ -10,6 +10,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::agent37::{Agent37, ApiError, CreateSpec, Instance};
+use crate::cache::{Plan, Shape};
 use crate::host_key;
 use crate::protocol::{Desired, Lease, Request, Ssh};
 pub(crate) use crate::settings::{disk_for, label_ok, settings, Settings};
@@ -76,38 +77,72 @@ pub(crate) fn status_of(instance: &Instance) -> &str {
     instance.status.as_deref().unwrap_or("unknown")
 }
 
-/// Finds the single `vm` instance with exactly `name`.
-pub(crate) fn find_by_name(api: &dyn Agent37, name: &str) -> Result<Option<Instance>, String> {
-    let list = api.list_instances().map_err(|e| e.operator_message())?;
-    let mut matches = list.into_iter().filter(|i| i.name.as_deref() == Some(name));
-    let found = matches.next();
-    if matches.next().is_some() {
-        return Err(format!("more than one instance is named {name}"));
+/// Rank among instances that match one lease: a lease Box first, then one not stopped.
+fn rank(instance: &Instance) -> (bool, bool) {
+    (
+        crate::cache::is_lease(instance),
+        status_of(instance) != "stopped",
+    )
+}
+
+/// The one of `found` a lease means, by [`rank`], with a warning naming the rest; `Err`
+/// gives them all back when the best two rank equal.
+pub(crate) fn pick(
+    mut found: Vec<Instance>,
+    diag: &mut dyn Write,
+) -> Result<Option<Instance>, Vec<Instance>> {
+    found.sort_by_key(|i| std::cmp::Reverse(rank(i)));
+    match found.as_slice() {
+        [best, next, ..] if rank(best) == rank(next) => Err(found),
+        [best, rest @ ..] if !rest.is_empty() => {
+            let others: Vec<&str> = rest.iter().map(|i| i.id.as_str()).collect();
+            let _ = writeln!(
+                diag,
+                "warning: {} matches one lease; using {}, not {}",
+                best.name.as_deref().unwrap_or_default(),
+                best.id,
+                others.join(", ")
+            );
+            Ok(Some(best.clone()))
+        }
+        _ => Ok(found.into_iter().next()),
     }
+}
+
+/// Finds the `vm` instance with exactly `name`, by [`pick`] when several have it.
+pub(crate) fn find_by_name(
+    api: &dyn Agent37,
+    name: &str,
+    diag: &mut dyn Write,
+) -> Result<Option<Instance>, String> {
+    let list = api.list_instances().map_err(|e| e.operator_message())?;
+    let matches = list
+        .into_iter()
+        .filter(|i| i.name.as_deref() == Some(name) && !crate::cache::is_seed(i))
+        .collect();
+    let found =
+        pick(matches, diag).map_err(|_| format!("more than one instance is named {name}"))?;
     match found {
         Some(i) if i.kind.as_deref() != Some("vm") => Err(format!("instance {} is not a VM", i.id)),
         other => Ok(other),
     }
 }
 
-/// Existing instance for the lease, or a newly created one (`true`).
-fn find_or_create(
+/// Creates the VM for the lease with the given shape.
+fn create(
     api: &dyn Agent37,
     settings: &Settings,
     desired: &Desired,
     name: &str,
+    shape: &Shape<'_>,
     diag: &mut dyn Write,
-) -> Result<(Instance, bool), String> {
-    let (cpu, memory_gb) = class_size(desired.class.as_deref())?;
-    let disk_gb = disk_for(settings.disk_source, settings.disk_gb, cpu, memory_gb)?;
-    if let Some(existing) = find_by_name(api, name)? {
-        return Ok((existing, false));
-    }
+) -> Result<Instance, String> {
+    let disk_gb = shape.disk_gb;
     let spec = CreateSpec {
         name: name.to_owned(),
         region: settings.region.clone(),
-        cpu,
-        memory_gb,
+        cpu: shape.cpu,
+        memory_gb: shape.memory_gb,
         template: settings.template.clone(),
         disk_gb,
         metadata: vec![
@@ -134,7 +169,7 @@ fn find_or_create(
         "acquire: created {} with a {disk_gb} GB disk",
         created.id
     );
-    Ok((created, true))
+    Ok(created)
 }
 
 /// Deletes any instance named `name` after a create whose outcome is unknown.
@@ -267,6 +302,8 @@ pub(crate) fn build_lease(
 }
 
 /// Finds or creates the VM for `request.desired` and waits until it is reachable.
+///
+/// With cache volumes and no VM yet, the newest seed of the key is claimed first.
 pub fn acquire(
     request: &Request,
     api: &dyn Agent37,
@@ -280,21 +317,52 @@ pub fn acquire(
         .ok_or("acquire requires a desired lease")?;
     let proxy = proxy_command(exe, s.key_file.as_deref())?;
     let name = format!("{}{}", prefix(&s.owner), desired.name);
-    let (instance, created) = find_or_create(api, &s, desired, &name, diag)?;
+    let (cpu, memory_gb) = class_size(desired.class.as_deref())?;
+    let disk_gb = disk_for(s.disk_source, s.disk_gb, cpu, memory_gb)?;
+    let shape = Shape {
+        cpu,
+        memory_gb,
+        disk_gb,
+        template: s.template.as_deref(),
+        region: &s.region,
+    };
+    let plan = Plan::new(&desired.cache_volumes);
+    let cache = CacheCtx {
+        key: plan.key(&shape),
+        plan,
+        owner: &s.owner,
+        desired,
+    };
+    let existing = find_by_name(api, &name, diag)?;
+    if existing.is_none() && !cache.plan.is_empty() {
+        let pair = (&cache.plan, cache.key.as_str());
+        if let Some(seed) = crate::cache::claim(api, &s.owner, desired, &name, pair, diag) {
+            if let Some((key, echo)) = from_seed(api, &seed, (&cache, &name), s.timeout, diag) {
+                return with_echo(
+                    build_lease(desired.clone(), &seed.id, "ready", Some(key), proxy),
+                    echo,
+                );
+            }
+        }
+    }
+    let (instance, created) = match existing {
+        Some(found) => (found, false),
+        None => (create(api, &s, desired, &name, &shape, diag)?, true),
+    };
     let id = instance.id.clone();
     let deadline = Instant::now() + Duration::from_secs(s.timeout);
-    let ready = wait_running(api, instance, deadline, s.timeout).and_then(|()| {
-        let _ = writeln!(diag, "acquire: checking required tools");
-        crate::tools::ensure(api, &id, deadline, diag)?;
-        crate::docker_root::ensure(api, &id, created, deadline, diag)?;
-        let _ = writeln!(diag, "acquire: reading host key");
-        fetch_host_key(api, &id, deadline)
-    });
+    let ready = wait_running(api, instance.clone(), deadline, s.timeout)
+        .and_then(|()| ready(api, &instance, (created, false), &cache, deadline, diag));
     match ready {
-        Ok(key) => build_lease(desired.clone(), &id, "ready", Some(key), proxy),
+        Ok((key, echo)) => with_echo(
+            build_lease(desired.clone(), &id, "ready", Some(key), proxy),
+            echo,
+        ),
         Err(err) => Err(cleanup(api, &id, created, err)),
     }
 }
 
+mod ready;
 mod resolve;
+use ready::{from_seed, ready, with_echo, CacheCtx};
 pub use resolve::resolve;

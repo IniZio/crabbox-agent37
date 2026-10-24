@@ -5,6 +5,7 @@
 
 pub mod agent37;
 pub mod api;
+mod cache;
 mod docker_root;
 pub mod doctor;
 mod fingerprint;
@@ -86,7 +87,7 @@ fn handle(input: &[u8], env_key: Option<String>, diag: &mut dyn Write) -> Result
         protocol::Operation::Acquire => lease_op(&request, env_key, diag, lease::acquire),
         protocol::Operation::Resolve => lease_op(&request, env_key, diag, lease::resolve),
         protocol::Operation::List => {
-            let rows = inventory::list(&request, &client(&request, env_key)?)?;
+            let rows = inventory::list(&request, &client(&request, env_key)?, diag)?;
             Ok(protocol::leases_response(&rows))
         }
         protocol::Operation::Release => {

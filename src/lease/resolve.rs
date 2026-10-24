@@ -25,11 +25,12 @@ fn locate(
     owner: &str,
     desired: Option<&Desired>,
     expected: &Expected,
+    diag: &mut dyn Write,
 ) -> Result<Instance, String> {
     let derived = desired.map(|d| format!("{}{}", prefix(owner), d.name));
     let Some(cloud_id) = expected.cloud_id.as_deref() else {
         let name = derived.ok_or("resolve needs a cloud id or a desired lease")?;
-        return find_by_name(api, &name)?.ok_or_else(|| format!("instance {name} not found"));
+        return find_by_name(api, &name, diag)?.ok_or_else(|| format!("instance {name} not found"));
     };
     let instance = api.get_instance(cloud_id).map_err(|e| match e {
         ApiError::Http { status: 404, .. } => format!("instance {cloud_id} not found"),
@@ -42,8 +43,11 @@ fn locate(
     {
         return Err(format!("instance {cloud_id} belongs to another owner"));
     }
+    if crate::cache::is_seed(&instance) {
+        return Err(format!("instance {cloud_id} not found"));
+    }
     if let Some(name) = derived {
-        let found = find_by_name(api, &name)?.map(|i| i.id);
+        let found = find_by_name(api, &name, diag)?.map(|i| i.id);
         if found.as_deref() != Some(cloud_id) {
             return Err(format!(
                 "instance id changed: expected {cloud_id}, found {}",
@@ -63,13 +67,13 @@ pub fn resolve(
     request: &Request,
     api: &dyn Agent37,
     exe: &Path,
-    _diag: &mut dyn Write,
+    diag: &mut dyn Write,
 ) -> Result<Lease, String> {
     let s = settings(&request.config)?;
     let desired = request.desired.as_ref();
     let expected = request.expected.clone().unwrap_or_default();
     let proxy = proxy_command(exe, s.key_file.as_deref())?;
-    let instance = locate(api, &s.owner, desired, &expected)?;
+    let instance = locate(api, &s.owner, desired, &expected, diag)?;
     let lease_id = agree(
         "lease id",
         &[

@@ -125,7 +125,7 @@ fn list_filters_maps_and_sorts() {
         inst("f", "crabbox-me--orphan", "me", None, None),
         inst("g", "crabbox-me--", "me", Some("l"), Some("s")),
     ]);
-    let rows = list(&request(Operation::List), &api).unwrap();
+    let rows = list(&request(Operation::List), &api, &mut std::io::sink()).unwrap();
     let got: Vec<_> = rows.iter().map(|r| (&*r.cloud_id, &*r.status)).collect();
     assert_eq!(got, [("c", "stopped"), ("b", "ready")]);
     assert_eq!(rows.first().map(|r| r.name.as_str()), Some("aa"));

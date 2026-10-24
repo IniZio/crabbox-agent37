@@ -3,8 +3,11 @@
 //! Every operation filters on [`owned`] first, so another owner's instance is
 //! never listed, matched or deleted.
 
+use std::collections::BTreeMap;
+use std::io::Write;
+
 use crate::agent37::{Agent37, ApiError, Instance};
-use crate::lease::{prefix, settings};
+use crate::lease::{pick, prefix, settings};
 use crate::protocol::{LeaseRow, Request};
 
 /// True only when both the name prefix and the owner metadata match.
@@ -19,7 +22,10 @@ pub fn owned(instance: &Instance, owner: &str) -> bool {
 
 /// The listable identity of an owned VM, or `None` when it has none.
 fn row(instance: &Instance, owner: &str) -> Option<LeaseRow> {
-    if !owned(instance, owner) || instance.kind.as_deref() != Some("vm") {
+    if !owned(instance, owner)
+        || instance.kind.as_deref() != Some("vm")
+        || crate::cache::is_seed(instance)
+    {
         return None;
     }
     let name = instance.name.as_deref()?.strip_prefix(&prefix(owner))?;
@@ -41,9 +47,10 @@ fn row(instance: &Instance, owner: &str) -> Option<LeaseRow> {
     })
 }
 
-/// True for an owned instance that lacks the identity `list` needs.
+/// True for an owned instance that lacks the identity `list` needs; a seed has none by design.
 fn unlistable(instance: &Instance, owner: &str) -> bool {
     owned(instance, owner)
+        && !crate::cache::is_seed(instance)
         && (instance.meta("crabbox_lease_id").is_none()
             || instance.meta("crabbox_slug").is_none()
             || instance
@@ -53,14 +60,31 @@ fn unlistable(instance: &Instance, owner: &str) -> bool {
                 .is_none_or(str::is_empty))
 }
 
-/// Lists this owner's VM leases, sorted by name then cloud id.
+/// Lists this owner's VM leases, sorted by name then cloud id; of several VMs with one name,
+/// a lease Box that is not stopped, with a warning.
 ///
 /// # Errors
 /// Returns the operator message when config or the API call fails.
-pub fn list(request: &Request, api: &dyn Agent37) -> Result<Vec<LeaseRow>, String> {
+pub fn list(
+    request: &Request,
+    api: &dyn Agent37,
+    diag: &mut dyn Write,
+) -> Result<Vec<LeaseRow>, String> {
     let owner = settings(&request.config)?.owner;
-    let instances = api.list_instances().map_err(|e| e.operator_message())?;
-    let mut rows: Vec<LeaseRow> = instances.iter().filter_map(|i| row(i, &owner)).collect();
+    let mut by_name: BTreeMap<Option<String>, Vec<Instance>> = BTreeMap::new();
+    for instance in api.list_instances().map_err(|e| e.operator_message())? {
+        if row(&instance, &owner).is_some() {
+            by_name
+                .entry(instance.name.clone())
+                .or_default()
+                .push(instance);
+        }
+    }
+    let mut rows: Vec<LeaseRow> = by_name
+        .into_values()
+        .flat_map(|same| pick(same, diag).map_or_else(|all| all, |one| one.into_iter().collect()))
+        .filter_map(|i| row(&i, &owner))
+        .collect();
     rows.sort_by(|a, b| (&a.name, &a.cloud_id).cmp(&(&b.name, &b.cloud_id)));
     Ok(rows)
 }
@@ -105,6 +129,9 @@ pub(crate) fn lease_instance(
     if instance.id != id {
         return Err(format!("instance {id} resolved to {}", instance.id));
     }
+    if owned(&instance, owner) && crate::cache::is_seed(&instance) {
+        return Ok(None);
+    }
     if !owned(&instance, owner) {
         return Err(format!("instance {id} belongs to another owner"));
     }
@@ -129,43 +156,55 @@ pub(crate) fn lease_instance(
     Ok(Some(instance))
 }
 
-/// Deletes exactly the requested instance after checking it belongs to this lease.
+/// Releases exactly the requested instance after checking it belongs to this lease: a
+/// running Box with cache volumes is kept stopped as a seed, anything else is deleted.
 ///
 /// # Errors
 /// Returns a message, without deleting, when the request does not match the instance.
 pub fn release(request: &Request, api: &dyn Agent37) -> Result<(), String> {
-    let owner = settings(&request.config)?.owner;
-    match lease_instance(request, api, &owner, "release")? {
-        Some(instance) => tolerate_missing(api.delete_instance(&instance.id)),
+    let s = settings(&request.config)?;
+    match lease_instance(request, api, &s.owner, "release")? {
+        Some(instance) => {
+            tolerate_missing(crate::cache::release(api, &s.owner, &instance, s.timeout))
+        }
         None => Ok(()),
     }
 }
 
-/// Deletes owned instances that `list` cannot report (no lease id, slug or name).
-/// crabbox can never release them; an interrupted acquire or manual create leaves them.
+/// Deletes owned instances `list` cannot report, and expired or surplus seeds.
+///
+/// crabbox can never release an instance with no lease id, slug or name; an interrupted
+/// acquire or manual create leaves them. A seed past `cache.ttlDays` or beyond the newest
+/// `cache.maxSeeds` goes too, if a fresh read still shows it a stopped seed.
 ///
 /// # Errors
 /// Returns the operator message when config or an API call fails.
 pub fn cleanup(request: &Request, api: &dyn Agent37) -> Result<String, String> {
     let owner = settings(&request.config)?.owner;
     let instances = api.list_instances().map_err(|e| e.operator_message())?;
-    let mut ids: Vec<&str> = instances
+    let mut ids: Vec<String> = instances
         .iter()
         .filter(|i| unlistable(i, &owner))
-        .map(|i| i.id.as_str())
+        .map(|i| i.id.clone())
         .collect();
-    ids.sort_unstable();
-    if ids.is_empty() {
+    let seeds: Vec<String> = crate::cache::gc(&instances, &owner, &request.config)?
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    if ids.is_empty() && seeds.is_empty() {
         return Ok("nothing to clean up".to_owned());
     }
     let verb = if request.dry_run {
+        ids.extend(seeds);
         "would delete"
     } else {
         for id in &ids {
             tolerate_missing(api.delete_instance(id))?;
         }
+        ids.extend(crate::cache::delete_seeds(api, &owner, &seeds, None));
         "deleted"
     };
+    ids.sort_unstable();
     Ok(format!(
         "{verb} {} instance(s): {}",
         ids.len(),
