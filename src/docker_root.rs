@@ -11,9 +11,18 @@ use std::time::Instant;
 use crate::agent37::{Agent37, ExecOutput};
 use crate::lease::{pause, status_of};
 
+/// Python program that sets `"data-root": "/root/docker"` in the `daemon.json` named by its
+/// argument, other keys kept.
+pub(crate) const MERGE: &str = r#"import json,os,sys; p=sys.argv[1]; d=json.load(open(p)) if os.path.exists(p) else {}; d.get("data-root") == "/root/docker" or open(p, "w").write(json.dumps({**d, "data-root": "/root/docker"}, indent=2) + "\n")"#;
+
 /// Merges the data root into `daemon.json`, then prints `ok`, or `reboot` when a running
-/// dockerd still uses another root.
-const SCRIPT: &str = r#": crabbox-docker-root; set -e; f=/etc/docker/daemon.json; mkdir -p /etc/docker /root/docker; python3 -c 'import json,os,sys; p=sys.argv[1]; d=json.load(open(p)) if os.path.exists(p) else {}; d.get("data-root") == "/root/docker" or open(p, "w").write(json.dumps({**d, "data-root": "/root/docker"}, indent=2) + "\n")' "$f"; if ! pidof dockerd >/dev/null; then echo ok; exit 0; fi; i=0; until r=$(docker info --format '{{.DockerRootDir}}' 2>/dev/null); do i=$((i+1)); if [ "$i" -ge 30 ]; then echo "dockerd runs but docker info fails" >&2; exit 5; fi; sleep 1; done; if [ "$r" = /root/docker ]; then echo ok; else echo reboot; fi"#;
+/// dockerd still uses another root. dockerd resolves a symlinked root, so a root equal to
+/// the target of `/root/docker` counts.
+fn script() -> String {
+    format!(
+        r#": crabbox-docker-root; set -e; f=/etc/docker/daemon.json; mkdir -p /etc/docker /root/docker; python3 -c '{MERGE}' "$f"; if ! pidof dockerd >/dev/null; then echo ok; exit 0; fi; i=0; until r=$(docker info --format '{{{{.DockerRootDir}}}}' 2>/dev/null); do i=$((i+1)); if [ "$i" -ge 30 ]; then echo "dockerd runs but docker info fails" >&2; exit 5; fi; sleep 1; done; if [ "$r" = /root/docker ] || [ "$r" = "$(readlink -f /root/docker)" ]; then echo ok; else echo reboot; fi"#
+    )
+}
 
 /// Puts Docker's data root on the billed disk of `id` when this acquire `created` it.
 ///
@@ -29,7 +38,7 @@ pub(crate) fn ensure(
         return Ok(());
     }
     let what = format!("putting Docker data on /root/docker on {id}");
-    if verdict(&what, api.exec_as_root(id, SCRIPT))? == "ok" {
+    if verdict(&what, api.exec_as_root(id, &script()))? == "ok" {
         let _ = writeln!(diag, "acquire: Docker data root is /root/docker");
         return Ok(());
     }
@@ -39,7 +48,7 @@ pub(crate) fn ensure(
     );
     reboot(api, id, deadline).map_err(|e| format!("{what}: {e}"))?;
     let after = loop {
-        match api.exec_as_root(id, SCRIPT) {
+        match api.exec_as_root(id, &script()) {
             Err(_) if pause(deadline) => {}
             out => break verdict(&what, out)?,
         }
@@ -70,7 +79,7 @@ fn verdict(
 }
 
 /// Stops then starts `id`, waiting for each state until `deadline`.
-fn reboot(api: &dyn Agent37, id: &str, deadline: Instant) -> Result<(), String> {
+pub(crate) fn reboot(api: &dyn Agent37, id: &str, deadline: Instant) -> Result<(), String> {
     api.stop_instance(id).map_err(|e| e.operator_message())?;
     wait_for(api, id, &["stopped", "sleeping"], deadline)?;
     api.start_instance(id).map_err(|e| e.operator_message())?;
@@ -78,7 +87,12 @@ fn reboot(api: &dyn Agent37, id: &str, deadline: Instant) -> Result<(), String> 
 }
 
 /// Polls `id` until its status is one of `want`.
-fn wait_for(api: &dyn Agent37, id: &str, want: &[&str], deadline: Instant) -> Result<(), String> {
+pub(crate) fn wait_for(
+    api: &dyn Agent37,
+    id: &str,
+    want: &[&str],
+    deadline: Instant,
+) -> Result<(), String> {
     loop {
         let instance = api.get_instance(id).map_err(|e| e.operator_message())?;
         let status = status_of(&instance);

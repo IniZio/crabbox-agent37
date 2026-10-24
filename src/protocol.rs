@@ -3,6 +3,9 @@
 use serde::Serialize;
 use serde_json::Value;
 
+mod cache;
+pub use cache::{CacheVolumeEcho, CacheVolumeRequest};
+
 /// The only protocol version this adapter speaks.
 const VERSION: u64 = 1;
 
@@ -75,6 +78,8 @@ pub struct Desired {
     pub name: String,
     /// Optional machine class.
     pub class: Option<String>,
+    /// Cache volumes to restore, acquire only.
+    pub cache_volumes: Vec<CacheVolumeRequest>,
 }
 
 /// Identifiers crabbox expects an existing lease to carry.
@@ -138,6 +143,9 @@ pub struct Lease {
     pub status: String,
     /// SSH connection details.
     pub ssh: Ssh,
+    /// What acquire did for each requested cache volume.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub cache_volumes: Vec<CacheVolumeEcho>,
 }
 
 /// One inventory row reported by list.
@@ -262,6 +270,7 @@ pub fn parse_request(input: &[u8]) -> Result<Request, String> {
             slug: required("slug")?,
             name: required("name")?,
             class: opt_str(o, "class"),
+            cache_volumes: cache::parse_cache_volumes(o)?,
         })
     })?;
     let expected = optional_object(object, "expected", |o| {
