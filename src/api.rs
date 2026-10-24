@@ -294,6 +294,25 @@ impl Agent37 for HttpAgent37 {
         self.post::<Value>(&path, &json!({})).map(|_| ())
     }
 
+    fn patch_instance(
+        &self,
+        id: &str,
+        name: &str,
+        metadata: &[(String, String)],
+    ) -> Result<Instance, ApiError> {
+        let metadata: Map<String, Value> = metadata
+            .iter()
+            .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+            .collect();
+        let result = self
+            .agent
+            .patch(self.url(&format!("/v1/instances/{}", encode_segment(id))))
+            .header("Authorization", self.bearer())
+            .send_json(json!({ "name": name, "metadata": metadata }));
+        let wire: WireInstance = decode(&Self::into_body(result)?)?;
+        Ok(wire.into())
+    }
+
     fn exec_as_root(&self, id: &str, command: &str) -> Result<ExecOutput, ApiError> {
         let path = format!("/v1/instances/{}/exec", encode_segment(id));
         let wire: WireExec = self.post(&path, &json!({"command": command, "user": "root"}))?;

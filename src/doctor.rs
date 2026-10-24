@@ -143,6 +143,14 @@ mod tests {
         fn start_instance(&self, _id: &str) -> Result<(), ApiError> {
             Ok(())
         }
+        fn patch_instance(
+            &self,
+            _: &str,
+            _: &str,
+            _: &[(String, String)],
+        ) -> Result<crate::agent37::Instance, ApiError> {
+            Err(ApiError::Decode("unused".into()))
+        }
         fn exec_as_root(&self, _id: &str, _command: &str) -> Result<ExecOutput, ApiError> {
             Err(ApiError::Unreachable("not used by doctor".into()))
         }

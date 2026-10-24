@@ -141,6 +141,13 @@ pub trait Agent37 {
     fn stop_instance(&self, id: &str) -> Result<(), ApiError>;
     /// `POST /v1/instances/{id}/start`.
     fn start_instance(&self, id: &str) -> Result<(), ApiError>;
+    /// `PATCH /v1/instances/{id}`: sets the name and replaces the whole metadata object.
+    fn patch_instance(
+        &self,
+        id: &str,
+        name: &str,
+        metadata: &[(String, String)],
+    ) -> Result<Instance, ApiError>;
 }
 
 #[cfg(test)]

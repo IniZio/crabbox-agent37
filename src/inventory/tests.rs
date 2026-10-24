@@ -43,6 +43,14 @@ impl Agent37 for Fake {
     fn start_instance(&self, _: &str) -> Result<(), ApiError> {
         Ok(())
     }
+    fn patch_instance(
+        &self,
+        _: &str,
+        _: &str,
+        _: &[(String, String)],
+    ) -> Result<crate::agent37::Instance, ApiError> {
+        Err(ApiError::Decode("unused".into()))
+    }
     fn exec_as_root(&self, _: &str, _: &str) -> Result<ExecOutput, ApiError> {
         Err(ApiError::Decode("unused".into()))
     }

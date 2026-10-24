@@ -142,6 +142,7 @@ pub fn resume(
             slug,
             name,
             class: None,
+            cache_volumes: Vec::new(),
         },
         &id,
         "ready",
