@@ -27,8 +27,15 @@ const DOCKER: &str = "g1x/docker/root-docker";
 
 /// Runs the binary with `request`; returns the exit code and parsed stdout.
 fn run(request: &Value) -> (i32, Value) {
+    run_in(request, &std::env::temp_dir())
+}
+
+/// Runs the binary with `request` and `tmp` as its temp dir, which holds the host's claim
+/// lock; a separate `tmp` stands for another host.
+fn run_in(request: &Value, tmp: &Path) -> (i32, Value) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_crabbox-agent37"))
         .env("AGENT37_API_KEY", KEY)
+        .env("TMPDIR", tmp)
         .env_remove("AGENT37_KEY_FILE")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -66,19 +73,34 @@ fn volumes() -> Value {
 
 /// Acquires lease `n` of class `class`; returns the lease object.
 fn acquire(fake: &FakeAgent37, n: u32, class: &str) -> Value {
-    let (code, out) = run(&json!({
-        "protocolVersion": 1, "operation": "acquire", "config": config(fake, &json!({})),
-        "desired": {"leaseId": format!("cbx_{n}"), "slug": format!("s{n}"),
-                    "name": format!("box-{n}"), "class": class, "cacheVolumes": volumes()},
-    }));
+    acquire_as(fake, "me", n, class, &std::env::temp_dir())
+}
+
+/// Acquires lease `n` of class `class` for `owner` on the host whose temp dir is `tmp`.
+fn acquire_as(fake: &FakeAgent37, owner: &str, n: u32, class: &str, tmp: &Path) -> Value {
+    let config = config(fake, &json!({ "owner": owner }));
+    let (code, out) = run_in(
+        &json!({
+            "protocolVersion": 1, "operation": "acquire", "config": config,
+            "desired": {"leaseId": format!("cbx_{n}"), "slug": format!("s{n}"),
+                        "name": format!("box-{n}"), "class": class, "cacheVolumes": volumes()},
+        }),
+        tmp,
+    );
     assert_eq!(code, 0, "acquire failed: {out}");
     out["lease"].clone()
 }
 
 /// Releases `lease`; returns the exit code.
 fn release(fake: &FakeAgent37, lease: &Value) -> i32 {
+    release_as(fake, "me", lease)
+}
+
+/// Releases `lease` for `owner`; returns the exit code.
+fn release_as(fake: &FakeAgent37, owner: &str, lease: &Value) -> i32 {
     let request = json!({
-        "protocolVersion": 1, "operation": "release", "config": config(fake, &json!({})),
+        "protocolVersion": 1, "operation": "release",
+        "config": config(fake, &json!({ "owner": owner })),
         "lease": {"leaseId": lease["leaseId"], "slug": lease["slug"],
                   "name": lease["name"], "cloudId": lease["cloudId"]},
     });
@@ -314,4 +336,182 @@ fn cleanup_deletes_expired_and_surplus_seeds_only() {
     let (code, out) = cleanup(json!({"maxSeeds": 2}));
     assert_eq!(code, 0, "{out}");
     assert_eq!(ids(&fake), ["s2", "s3"], "beyond the newest 2: {out}");
+}
+
+/// Requests for instance `id` with `method` and path `suffix` from request `from` on.
+fn calls(fake: &FakeAgent37, from: usize, method: &str, id: &Value, suffix: &str) -> usize {
+    let path = format!("/v1/instances/{}{suffix}", id.as_str().unwrap());
+    fake.requests()
+        .iter()
+        .skip(from)
+        .filter(|r| r.method == method && r.path == path)
+        .count()
+}
+
+#[test]
+fn two_hosts_racing_for_one_seed_leave_it_to_exactly_one_lease() {
+    let fake = FakeAgent37::start_with_key(KEY);
+    let first = acquire(&fake, 1, "standard");
+    assert_eq!(release(&fake, &first), 0);
+    let seed = first["cloudId"].clone();
+    let from = fake.requests().len();
+    fake.start_race();
+    let hosts = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
+    let leases: Vec<Value> = std::thread::scope(|s| {
+        #[allow(
+            clippy::needless_collect,
+            reason = "both racers start before either is joined"
+        )]
+        let racers: Vec<_> = (2..=3)
+            .zip(&hosts)
+            .map(|(n, tmp)| {
+                let fake = &fake;
+                s.spawn(move || acquire_as(fake, "me", n, "standard", tmp.path()))
+            })
+            .collect();
+        racers.into_iter().map(|r| r.join().unwrap()).collect()
+    });
+    let (winners, losers): (Vec<&Value>, Vec<&Value>) =
+        leases.iter().partition(|l| l["cloudId"] == seed);
+    assert_eq!((winners.len(), losers.len()), (1, 1), "{leases:?}");
+    assert_eq!(outcomes(winners[0]), all("restored"));
+    assert_eq!(outcomes(losers[0]), all("empty"), "the loser goes cold");
+    let now = instance(&fake, &seed);
+    assert_eq!(now["status"], "running");
+    assert_eq!(
+        now["metadata"]["crabbox_lease_id"], winners[0]["leaseId"],
+        "the seed carries the winner's lease"
+    );
+    assert_eq!(
+        now["name"],
+        format!("crabbox-me--{}", winners[0]["name"].as_str().unwrap())
+    );
+    assert_eq!(
+        calls(&fake, from, "POST", &seed, "/stop"),
+        0,
+        "nobody stops the winner's Box"
+    );
+    assert_eq!(
+        calls(&fake, from, "DELETE", &seed, ""),
+        0,
+        "nobody deletes the winner's Box"
+    );
+}
+
+#[test]
+fn without_the_host_claim_lock_acquire_goes_cold() {
+    let fake = FakeAgent37::start_with_key(KEY);
+    let first = acquire(&fake, 1, "standard");
+    assert_eq!(release(&fake, &first), 0);
+    let second = acquire_as(
+        &fake,
+        "me",
+        2,
+        "standard",
+        Path::new("/nonexistent/crabbox-tmp"),
+    );
+    assert_ne!(second["cloudId"], first["cloudId"]);
+    assert_eq!(outcomes(&second), all("empty"));
+    assert_eq!(
+        instance(&fake, &first["cloudId"])["metadata"]["crabbox_role"],
+        "seed"
+    );
+}
+
+#[test]
+fn another_owners_seed_of_the_same_key_is_never_claimed() {
+    let fake = FakeAgent37::start_with_key(KEY);
+    let tmp = std::env::temp_dir();
+    let theirs = acquire_as(&fake, "you", 1, "standard", &tmp);
+    assert_eq!(release_as(&fake, "you", &theirs), 0);
+    let mine = acquire(&fake, 2, "standard");
+    assert_ne!(mine["cloudId"], theirs["cloudId"]);
+    assert_eq!(outcomes(&mine), all("empty"));
+    let seed = instance(&fake, &theirs["cloudId"]);
+    assert_eq!(seed["status"], "stopped");
+    assert_eq!(seed["metadata"]["crabbox_owner"], "you");
+}
+
+#[test]
+fn a_release_deletes_older_seeds_of_its_key_only() {
+    let fake = FakeAgent37::start_with_key(KEY);
+    let fast = acquire(&fake, 1, "fast");
+    let standard = acquire(&fake, 2, "standard");
+    assert_eq!(release(&fake, &fast), 0);
+    assert_eq!(release(&fake, &standard), 0);
+    for lease in [&fast, &standard] {
+        assert_eq!(
+            instance(&fake, &lease["cloudId"])["metadata"]["crabbox_role"],
+            "seed",
+            "each key keeps its seed"
+        );
+    }
+}
+
+#[test]
+fn cleanup_spares_a_seed_claimed_after_it_listed() {
+    let fake = FakeAgent37::start_with_key(KEY);
+    let old = (SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        - 8 * 86_400)
+        .to_string();
+    fake.add_instance_with_metadata(
+        "s1",
+        &format!("crabbox-me--seed.{old}"),
+        "vm",
+        "stopped",
+        &[
+            ("crabbox_owner", "me"),
+            ("crabbox_role", "seed"),
+            ("crabbox_cache_key", "k"),
+            ("crabbox_seed_gen", &old),
+        ],
+    );
+    fake.take_after_list("s1");
+    let config = config(&fake, &json!({}));
+    let (code, out) = run(&json!({"protocolVersion": 1, "operation": "cleanup", "config": config}));
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(fake.instance("s1").unwrap()["status"], "running", "{out}");
+}
+
+#[test]
+fn a_fresh_box_moves_its_mounted_docker_data_into_the_store() {
+    let fake = FakeAgent37::start_with_key(KEY);
+    let root = fake.box_root("vm00000001");
+    let docker = root.join("root/docker");
+    std::fs::create_dir_all(docker.join("image")).unwrap();
+    std::fs::write(docker.join("image/layer"), "pulled").unwrap();
+    std::fs::write(root.join(".mounts"), format!("{}\n", docker.display())).unwrap();
+    let lease = acquire(&fake, 1, "standard");
+    assert_eq!(lease["cloudId"], "vm00000001");
+    assert_eq!(
+        std::fs::read_to_string(root.join(".unmounted"))
+            .unwrap()
+            .trim(),
+        docker.display().to_string(),
+        "the init's bind mount is detached first"
+    );
+    assert_eq!(std::fs::read_link(&docker).unwrap(), store(&root, DOCKER));
+    assert_eq!(
+        std::fs::read_to_string(store(&root, DOCKER).join("image/layer")).unwrap(),
+        "pulled",
+        "dockerd's data moved into the store, not deleted"
+    );
+}
+
+#[test]
+fn release_freezes_root_before_the_stop() {
+    let fake = FakeAgent37::start_with_key(KEY);
+    let lease = acquire(&fake, 1, "standard");
+    let root = fake.box_root(lease["cloudId"].as_str().unwrap());
+    assert_eq!(release(&fake, &lease), 0);
+    assert_eq!(
+        std::fs::read_to_string(root.join(".frozen"))
+            .unwrap()
+            .trim(),
+        format!("-f {}", root.join("root").display())
+    );
+    assert_eq!(instance(&fake, &lease["cloudId"])["status"], "stopped");
 }
