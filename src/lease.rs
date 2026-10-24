@@ -303,7 +303,8 @@ pub(crate) fn build_lease(
 
 /// Finds or creates the VM for `request.desired` and waits until it is reachable.
 ///
-/// With cache volumes and no VM yet, the newest seed of the key is claimed first.
+/// With cache volumes, a cache scope and no VM yet, the newest seed of the key is claimed
+/// first.
 pub fn acquire(
     request: &Request,
     api: &dyn Agent37,
@@ -327,15 +328,18 @@ pub fn acquire(
         region: &s.region,
     };
     let plan = Plan::new(&desired.cache_volumes);
+    let scope = (!plan.is_empty())
+        .then(|| crate::cache::scope(desired.cache_scope.as_deref(), diag))
+        .flatten();
     let cache = CacheCtx {
-        key: plan.key(&shape),
+        key: scope.map(|scope| crate::cache::seed_key(scope, &s.owner, &shape)),
         plan,
         owner: &s.owner,
         desired,
     };
     let existing = find_by_name(api, &name, diag)?;
-    if existing.is_none() && !cache.plan.is_empty() {
-        let pair = (&cache.plan, cache.key.as_str());
+    if let (None, Some(key)) = (&existing, cache.key.as_deref()) {
+        let pair = (&cache.plan, key);
         if let Some(seed) = crate::cache::claim(api, &s.owner, desired, &name, pair, diag) {
             if let Some((key, echo)) = from_seed(api, &seed, (&cache, &name), s.timeout, diag) {
                 return with_echo(

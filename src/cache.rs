@@ -5,6 +5,7 @@
 //! it: a VM has no systemd, ignores fstab and loses bind mounts on reboot, while symlinks
 //! survive a stop and start.
 
+mod gc;
 mod script;
 mod seed;
 
@@ -14,7 +15,8 @@ use ring::digest;
 
 use crate::protocol::{CacheVolumeEcho, CacheVolumeRequest};
 
-pub(crate) use seed::{claim, delete_seeds, gc, is_lease, is_seed, release, setup, take, Taken};
+pub(crate) use gc::{delete_seeds, gc};
+pub(crate) use seed::{claim, is_lease, is_seed, release, setup, take, Taken};
 
 /// The login user's home; `~/` paths resolve here.
 const HOME: &str = "/root";
@@ -204,6 +206,34 @@ pub(crate) struct Shape<'a> {
     pub(crate) region: &'a str,
 }
 
+/// `desired.cacheScope` when it is 16 lowercase hex; anything else sent is reported and
+/// dropped, so the Box goes cold and is never seeded.
+pub(crate) fn scope<'a>(sent: Option<&'a str>, diag: &mut dyn std::io::Write) -> Option<&'a str> {
+    let sent = sent?;
+    let valid = sent.len() == 16 && sent.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    if !valid {
+        let _ = writeln!(
+            diag,
+            "acquire: ignoring desired.cacheScope {sent:?}: not 16 lowercase hex; no seed"
+        );
+    }
+    valid.then_some(sent)
+}
+
+/// Seed key, as 16 hex: the cache scope, owner, template, VM shape and region. A seed holds
+/// the whole Box, so only a Box of the same scope may reuse it; groups are not part of it.
+pub(crate) fn seed_key(scope: &str, owner: &str, shape: &Shape<'_>) -> String {
+    let text = format!(
+        "{scope}\n{owner}\n{}\n{}x{}x{}\n{}",
+        shape.template.unwrap_or(""),
+        shape.cpu,
+        shape.memory_gb,
+        shape.disk_gb,
+        shape.region
+    );
+    sha256_hex(&text, 8)
+}
+
 /// A request entry as a typed volume, or why it is refused.
 fn parse_entry(req: &CacheVolumeRequest) -> Result<(Token, Volume), String> {
     let group = Token::parse(&req.group).map_err(|e| format!("group {e}"))?;
@@ -269,22 +299,6 @@ impl Plan {
     /// True when no group is valid, so the Box runs without a cache.
     pub(crate) const fn is_empty(&self) -> bool {
         self.groups.is_empty()
-    }
-
-    /// Seed key: the sorted group ids plus the VM shape, template and region, as 16 hex.
-    pub(crate) fn key(&self, shape: &Shape<'_>) -> String {
-        let mut ids: Vec<&str> = self.groups.iter().map(|g| g.id.as_str()).collect();
-        ids.sort_unstable();
-        let text = format!(
-            "{}\n{}x{}x{}\n{}\n{}",
-            ids.join(","),
-            shape.cpu,
-            shape.memory_gb,
-            shape.disk_gb,
-            shape.template.unwrap_or(""),
-            shape.region
-        );
-        sha256_hex(&text, 8)
     }
 
     /// Echo of every requested name: `restored` names came from seed generation `generation`.

@@ -143,6 +143,7 @@ pub fn resume(
             name,
             class: None,
             cache_volumes: Vec::new(),
+            cache_scope: None,
         },
         &id,
         "ready",

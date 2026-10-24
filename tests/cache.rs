@@ -11,156 +11,18 @@
 #[path = "support/fake_agent37.rs"]
 mod fake_agent37;
 
+#[allow(dead_code, reason = "each test binary uses a different subset")]
+#[path = "support/cache_client.rs"]
+mod cache_client;
+
 use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use cache_client::*;
 use fake_agent37::{FakeAgent37, StartFault};
 use serde_json::{json, Value};
-
-/// Key the fake accepts.
-const KEY: &str = "sk_test_fake";
-/// Data dir of the npm volume, relative to the store.
-const NPM: &str = "g1/npm/npm-82ec3afe";
-/// Data dir of the docker volume's `~/docker` path, relative to the store.
-const DOCKER: &str = "g1x/docker/docker-784af2d5";
-
-/// Runs the binary with `request`; returns the exit code and parsed stdout.
-fn run(request: &Value) -> (i32, Value) {
-    run_in(request, &std::env::temp_dir())
-}
-
-/// Runs the binary with `request` and `tmp` as its temp dir, which holds the host's claim
-/// lock; a separate `tmp` stands for another host.
-fn run_in(request: &Value, tmp: &Path) -> (i32, Value) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_crabbox-agent37"))
-        .env("AGENT37_API_KEY", KEY)
-        .env("TMPDIR", tmp)
-        .env_remove("AGENT37_KEY_FILE")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    std::io::Write::write_all(
-        &mut child.stdin.take().unwrap(),
-        request.to_string().as_bytes(),
-    )
-    .unwrap();
-    let out = child.wait_with_output().unwrap();
-    let raw = String::from_utf8(out.stdout).unwrap();
-    let parsed = serde_json::from_str(&raw).unwrap_or_else(|e| panic!("bad stdout {raw:?}: {e}"));
-    (out.status.code().unwrap(), parsed)
-}
-
-/// Config for owner `me` against `fake`, with extra keys merged in.
-fn config(fake: &FakeAgent37, extra: &Value) -> Value {
-    let mut c = json!({ "apiUrl": fake.url(), "owner": "me", "readyTimeoutSeconds": 5 });
-    if let (Some(c), Some(extra)) = (c.as_object_mut(), extra.as_object()) {
-        c.extend(extra.clone());
-    }
-    c
-}
-
-/// npm in group `g1`, and the sealed docker volume in its own group `g1x`.
-fn volumes() -> Value {
-    json!([
-        {"group": "g1", "name": "npm", "key": "g1-npm", "paths": ["~/.npm"]},
-        {"group": "g1x", "name": "docker", "key": "g1x-docker",
-         "paths": ["~/docker", "/var/lib/containerd"], "sealed": true},
-    ])
-}
-
-/// Acquires lease `n` of class `class`; returns the lease object.
-fn acquire(fake: &FakeAgent37, n: u32, class: &str) -> Value {
-    acquire_as(fake, "me", n, class, &std::env::temp_dir())
-}
-
-/// Acquires lease `n` of class `class` for `owner` on the host whose temp dir is `tmp`.
-fn acquire_as(fake: &FakeAgent37, owner: &str, n: u32, class: &str, tmp: &Path) -> Value {
-    let config = config(fake, &json!({ "owner": owner }));
-    let (code, out) = run_in(
-        &json!({
-            "protocolVersion": 1, "operation": "acquire", "config": config,
-            "desired": {"leaseId": format!("cbx_{n}"), "slug": format!("s{n}"),
-                        "name": format!("box-{n}"), "class": class, "cacheVolumes": volumes()},
-        }),
-        tmp,
-    );
-    assert_eq!(code, 0, "acquire failed: {out}");
-    out["lease"].clone()
-}
-
-/// Releases `lease`; returns the exit code.
-fn release(fake: &FakeAgent37, lease: &Value) -> i32 {
-    release_as(fake, "me", lease)
-}
-
-/// Releases `lease` for `owner`; returns the exit code.
-fn release_as(fake: &FakeAgent37, owner: &str, lease: &Value) -> i32 {
-    let request = json!({
-        "protocolVersion": 1, "operation": "release",
-        "config": config(fake, &json!({ "owner": owner })),
-        "lease": {"leaseId": lease["leaseId"], "slug": lease["slug"],
-                  "name": lease["name"], "cloudId": lease["cloudId"]},
-    });
-    run(&request).0
-}
-
-/// `(name, outcome)` of each echoed volume.
-fn outcomes(lease: &Value) -> Vec<(String, String)> {
-    lease["cacheVolumes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|e| {
-            (
-                e["name"].as_str().unwrap().into(),
-                e["outcome"].as_str().unwrap().into(),
-            )
-        })
-        .collect()
-}
-
-/// Every volume's outcome is `want`.
-fn all(want: &str) -> Vec<(String, String)> {
-    vec![("npm".into(), want.into()), ("docker".into(), want.into())]
-}
-
-/// Store directory `rel` on `root`.
-fn store(root: &Path, rel: &str) -> PathBuf {
-    root.join("root/.crabbox-cache").join(rel)
-}
-
-/// The instance `id` as the fake holds it.
-fn instance(fake: &FakeAgent37, id: &Value) -> Value {
-    fake.instance(id.as_str().unwrap()).unwrap_or(Value::Null)
-}
-
-/// Entries of `dir`, sorted.
-fn entries(dir: &Path) -> Vec<String> {
-    let mut names: Vec<String> = std::fs::read_dir(dir)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
-    names.sort();
-    names
-}
-
-/// Marks the docker volume sealed on `root`, as moor's seal script does.
-fn seal_docker(root: &Path) {
-    std::fs::write(store(root, DOCKER).join(".crabbox-sealed"), "").unwrap();
-    std::fs::write(
-        store(
-            root,
-            "g1x/docker/var-lib-containerd-399dacdf/.crabbox-sealed",
-        ),
-        "",
-    )
-    .unwrap();
-}
 
 #[test]
 fn cold_acquire_links_every_path_and_echoes_empty() {
@@ -354,16 +216,6 @@ fn cleanup_deletes_expired_and_surplus_seeds_only() {
     let (code, out) = cleanup(json!({"maxSeeds": 2}));
     assert_eq!(code, 0, "{out}");
     assert_eq!(ids(&fake), ["s2", "s3"], "beyond the newest 2: {out}");
-}
-
-/// Requests for instance `id` with `method` and path `suffix` from request `from` on.
-fn calls(fake: &FakeAgent37, from: usize, method: &str, id: &Value, suffix: &str) -> usize {
-    let path = format!("/v1/instances/{}{suffix}", id.as_str().unwrap());
-    fake.requests()
-        .iter()
-        .skip(from)
-        .filter(|r| r.method == method && r.path == path)
-        .count()
 }
 
 #[test]

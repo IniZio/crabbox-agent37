@@ -10,8 +10,7 @@ use std::fs::File;
 use std::io::Write;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use serde_json::Value;
-
+use super::gc::delete_seeds;
 use super::{script, Plan};
 use crate::agent37::{Agent37, Instance};
 use crate::docker_root::{reboot, wait_for};
@@ -28,11 +27,11 @@ const KEY: &str = "crabbox_cache_key";
 /// Sealed volumes of a lease, from [`script::sealed`].
 const SEALED: &str = "crabbox_cache_sealed";
 /// A seed's generation (release time, unix seconds); on a lease, the seed it came from.
-const GEN: &str = "crabbox_seed_gen";
-/// Seed age limit when the config sets no `cache.ttlDays`.
-const TTL_DAYS: u64 = 7;
-/// Seeds kept per owner when the config sets no `cache.maxSeeds`.
-const MAX_SEEDS: u64 = 10;
+pub(super) const GEN: &str = "crabbox_seed_gen";
+/// When a Box last became a seed (unix seconds); a seed not stopped long after is stuck.
+pub(super) const SINCE: &str = "crabbox_seed_since";
+/// Seconds a returned seed gets to stop.
+const STOP_SECS: u64 = 120;
 
 /// True for a Box kept as a seed.
 pub(crate) fn is_seed(instance: &Instance) -> bool {
@@ -46,7 +45,7 @@ pub(crate) fn is_lease(instance: &Instance) -> bool {
 
 /// True for a stopped seed VM of `owner`, of `key` when one is given: the only Box a claim
 /// takes or a cleanup deletes.
-fn stopped_seed(instance: &Instance, owner: &str, key: Option<&str>) -> bool {
+pub(super) fn stopped_seed(instance: &Instance, owner: &str, key: Option<&str>) -> bool {
     owned(instance, owner)
         && is_seed(instance)
         && key.is_none_or(|k| instance.meta(KEY) == Some(k))
@@ -55,12 +54,12 @@ fn stopped_seed(instance: &Instance, owner: &str, key: Option<&str>) -> bool {
 }
 
 /// A seed's generation; unreadable sorts oldest.
-fn generation(instance: &Instance) -> u64 {
+pub(super) fn generation(instance: &Instance) -> u64 {
     instance.meta(GEN).and_then(|g| g.parse().ok()).unwrap_or(0)
 }
 
 /// Seconds since the epoch.
-fn now() -> u64 {
+pub(super) fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
@@ -89,7 +88,7 @@ fn lease_metadata(
 }
 
 /// Exclusive lock on this owner's claim file; claims from one host run one at a time.
-fn lock(owner: &str) -> Option<File> {
+pub(super) fn lock(owner: &str) -> Option<File> {
     let path = std::env::temp_dir().join(format!("crabbox-agent37-{owner}.claim.lock"));
     let file = File::options()
         .create(true)
@@ -155,7 +154,8 @@ fn holds(instance: &Instance, name: &str, desired: &Desired) -> bool {
 /// Gives back a claimed seed that failed before its in-Box claim, so the cold Box made next
 /// is the only one named for this lease. A Box still carrying this lease gets its seed name
 /// and metadata again, or is deleted when a fresh read does not show that; a Box carrying
-/// another lease, or unreadable, is left alone. Returns what it did.
+/// another lease, or unreadable, is left alone. A returned seed that is not stopped is
+/// stopped, since only a stopped seed is ever claimed. Returns what it did.
 fn unclaim(
     api: &dyn Agent37,
     id: &str,
@@ -167,22 +167,40 @@ fn unclaim(
     }
     let (seed_name, meta) = seed_identity(owner, key, gen);
     let _ = api.patch_instance(id, &seed_name, &meta);
+    let reverted = |i: &Instance| is_seed(i) && i.name.as_deref() == Some(seed_name.as_str());
     match api.get_instance(id) {
-        Ok(i) if is_seed(&i) && i.name.as_deref() == Some(seed_name.as_str()) => {
-            "returned to the seeds"
+        Ok(i) if reverted(&i) && status_of(&i) == "stopped" => "returned to the seeds",
+        Ok(i) if reverted(&i) => {
+            let deadline = Instant::now() + Duration::from_secs(STOP_SECS);
+            let stopped =
+                api.stop_instance(id).is_ok() && wait_for(api, id, &["stopped"], deadline).is_ok();
+            if stopped {
+                return "stopped and returned to the seeds";
+            }
+            let guard = lock(owner);
+            let ours = |i: &Instance| reverted(i) || holds(i, name, desired);
+            match api.get_instance(id) {
+                Ok(i) if status_of(&i) == "stopped" => "returned to the seeds",
+                Ok(i) if guard.is_some() && ours(&i) && api.delete_instance(id).is_ok() => {
+                    "deleted after its stop failed"
+                }
+                _ => "left alone after its stop failed",
+            }
         }
         Ok(i) if holds(&i, name, desired) && api.delete_instance(id).is_ok() => "deleted",
         _ => "left alone",
     }
 }
 
-/// A seed's name and metadata for generation `gen` of `key`.
+/// A seed's name and metadata for generation `gen` of `key`; [`SINCE`] is now.
 fn seed_identity(owner: &str, key: &str, gen: &str) -> (String, Vec<(String, String)>) {
+    let since = now().to_string();
     let meta = [
         ("crabbox_owner", owner),
         (ROLE, "seed"),
         (KEY, key),
         (GEN, gen),
+        (SINCE, &since),
     ]
     .iter()
     .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
@@ -241,13 +259,14 @@ pub(crate) fn take(
 }
 
 /// Links every planned volume on running `instance` and records the lease's cache metadata.
+/// Without a `key` nothing is recorded, so release deletes the Box.
 ///
 /// Reboots once when a running daemon held a replaced directory.
 pub(crate) fn setup(
     api: &dyn Agent37,
     instance: &Instance,
     (owner, desired): (&str, &Desired),
-    (plan, key): (&Plan, &str),
+    (plan, key): (&Plan, Option<&str>),
     deadline: Instant,
     diag: &mut dyn Write,
 ) -> Result<Vec<CacheVolumeEcho>, String> {
@@ -268,7 +287,7 @@ pub(crate) fn setup(
         reboot(api, id, deadline)?;
     }
     let gen = instance.meta(GEN);
-    if instance.meta(KEY) != Some(key) {
+    if let Some(key) = key.filter(|k| instance.meta(KEY) != Some(*k)) {
         let name = instance.name.as_deref().unwrap_or_default();
         let meta = lease_metadata(owner, desired, plan, key, gen);
         api.patch_instance(id, name, &meta)
@@ -328,59 +347,4 @@ pub(crate) fn release(
     } else {
         api.delete_instance(&instance.id)
     }
-}
-
-/// A non-negative integer under `config.cache.<field>`, else `default`.
-fn limit(config: &Value, field: &str, default: u64) -> Result<u64, String> {
-    match config.get("cache").and_then(|c| c.get(field)) {
-        None | Some(Value::Null) => Ok(default),
-        Some(v) => v
-            .as_u64()
-            .ok_or_else(|| format!("config.cache.{field} must be a whole number")),
-    }
-}
-
-/// Deletes each of `ids` that a fresh read under the host claim lock still shows as a
-/// stopped seed of `owner` (and of `key` when given); returns the ids deleted. A claim
-/// renames a seed before it starts it, so a Box being claimed is never deleted. Without the
-/// lock nothing is deleted.
-pub(crate) fn delete_seeds(
-    api: &dyn Agent37,
-    owner: &str,
-    ids: &[String],
-    key: Option<&str>,
-) -> Vec<String> {
-    let Some(_guard) = lock(owner) else {
-        return Vec::new();
-    };
-    ids.iter()
-        .filter(|id| {
-            api.get_instance(id)
-                .is_ok_and(|now| stopped_seed(&now, owner, key))
-                && api.delete_instance(id).is_ok()
-        })
-        .cloned()
-        .collect()
-}
-
-/// Ids of this owner's seeds past `cache.ttlDays` or beyond the newest `cache.maxSeeds`.
-pub(crate) fn gc<'a>(
-    instances: &'a [Instance],
-    owner: &str,
-    config: &Value,
-) -> Result<Vec<&'a str>, String> {
-    let ttl = limit(config, "ttlDays", TTL_DAYS)?.saturating_mul(86_400);
-    let max = usize::try_from(limit(config, "maxSeeds", MAX_SEEDS)?).unwrap_or(usize::MAX);
-    let mut seeds: Vec<&Instance> = instances
-        .iter()
-        .filter(|i| stopped_seed(i, owner, None))
-        .collect();
-    seeds.sort_by_key(|i| std::cmp::Reverse((generation(i), i.id.clone())));
-    let cutoff = now().saturating_sub(ttl);
-    Ok(seeds
-        .into_iter()
-        .enumerate()
-        .filter(|(n, i)| *n >= max || generation(i) < cutoff)
-        .map(|(_, i)| i.id.as_str())
-        .collect())
 }
