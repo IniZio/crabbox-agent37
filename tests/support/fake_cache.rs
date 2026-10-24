@@ -139,6 +139,10 @@ pub(super) struct Rivals {
     start_fault: Option<StartFault>,
     /// Instance whose `PATCH`es fail.
     patch_blocked: Option<String>,
+    /// Whether every claim inside a Box fails.
+    claim_fails: bool,
+    /// Instance whose `stop`s fail.
+    stop_blocked: Option<String>,
 }
 
 /// How the fake fails the next `start`: the Box reports `failed` and the call answers 500.
@@ -151,15 +155,41 @@ pub(crate) enum StartFault {
     ThenPatchesFail,
     /// A rival lease claimed the Box just before.
     AfterRivalClaim,
+    /// The start succeeds, but every claim inside the Box fails.
+    ClaimFails,
+    /// As [`StartFault::ClaimFails`], and every later `stop` of that Box fails.
+    ClaimFailsThenStopFails,
+}
+
+/// The answer to an `exec` of `command` that the armed faults refuse.
+pub(super) fn refused_exec(state: &State, command: &str) -> Option<(u16, Value)> {
+    (state.rivals.claim_fails && command.starts_with(": crabbox-cache-claim;"))
+        .then(|| (502, nested_error("exec_failed", "Exec failed.")))
+}
+
+/// The answer to a `stop` of `id` that the armed faults refuse.
+pub(super) fn refused_stop(state: &State, id: &str) -> Option<(u16, Value)> {
+    (state.rivals.stop_blocked.as_deref() == Some(id))
+        .then(|| (500, nested_error("internal", "Stop failed.")))
 }
 
 /// Fails `start` of `id` when a fault is armed; `None` lets it start.
 pub(super) fn start(state: &mut State, id: &str) -> Option<(u16, Value)> {
     let fault = state.rivals.start_fault.take()?;
+    match fault {
+        StartFault::ClaimFails | StartFault::ClaimFailsThenStopFails => {
+            state.rivals.claim_fails = true;
+            if matches!(fault, StartFault::ClaimFailsThenStopFails) {
+                state.rivals.stop_blocked = Some(id.to_owned());
+            }
+            return None;
+        }
+        _ => {}
+    }
     let instance = state.instances.iter_mut().find(|i| i["id"] == id)?;
     instance["status"] = json!("failed");
     match fault {
-        StartFault::Fails => {}
+        StartFault::Fails | StartFault::ClaimFails | StartFault::ClaimFailsThenStopFails => {}
         StartFault::ThenPatchesFail => state.rivals.patch_blocked = Some(id.to_owned()),
         StartFault::AfterRivalClaim => {
             instance["name"] = json!("crabbox-me--rival");
