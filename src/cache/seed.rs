@@ -39,6 +39,11 @@ pub(crate) fn is_seed(instance: &Instance) -> bool {
     instance.meta(ROLE) == Some("seed")
 }
 
+/// True for a Box a lease with cache volumes runs on.
+pub(crate) fn is_lease(instance: &Instance) -> bool {
+    instance.meta(ROLE) == Some("lease")
+}
+
 /// True for a stopped seed VM of `owner`, of `key` when one is given: the only Box a claim
 /// takes or a cleanup deletes.
 fn stopped_seed(instance: &Instance, owner: &str, key: Option<&str>) -> bool {
@@ -147,13 +152,51 @@ fn holds(instance: &Instance, name: &str, desired: &Desired) -> bool {
         && !is_seed(instance)
 }
 
+/// Gives back a claimed seed that failed before its in-Box claim, so the cold Box made next
+/// is the only one named for this lease. A Box still carrying this lease gets its seed name
+/// and metadata again, or is deleted when a fresh read does not show that; a Box carrying
+/// another lease, or unreadable, is left alone. Returns what it did.
+fn unclaim(
+    api: &dyn Agent37,
+    id: &str,
+    (owner, desired, name): (&str, &Desired, &str),
+    (key, gen): (&str, &str),
+) -> &'static str {
+    if !api.get_instance(id).is_ok_and(|i| holds(&i, name, desired)) {
+        return "left to whoever holds it";
+    }
+    let (seed_name, meta) = seed_identity(owner, key, gen);
+    let _ = api.patch_instance(id, &seed_name, &meta);
+    match api.get_instance(id) {
+        Ok(i) if is_seed(&i) && i.name.as_deref() == Some(seed_name.as_str()) => {
+            "returned to the seeds"
+        }
+        Ok(i) if holds(&i, name, desired) && api.delete_instance(id).is_ok() => "deleted",
+        _ => "left alone",
+    }
+}
+
+/// A seed's name and metadata for generation `gen` of `key`.
+fn seed_identity(owner: &str, key: &str, gen: &str) -> (String, Vec<(String, String)>) {
+    let meta = [
+        ("crabbox_owner", owner),
+        (ROLE, "seed"),
+        (KEY, key),
+        (GEN, gen),
+    ]
+    .iter()
+    .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+    .collect();
+    (format!("{}seed.{gen}", prefix(owner)), meta)
+}
+
 /// What starting a claimed seed came to.
 pub(crate) enum Taken {
     /// It runs and is this lease's alone.
     Ours(Instance),
     /// Another lease claimed it inside the Box first; it is theirs and left alone.
     Lost,
-    /// It failed before this lease could claim it inside the Box; it is left alone.
+    /// It failed before this lease could claim it inside the Box; see [`unclaim`].
     Failed(String),
 }
 
@@ -169,20 +212,22 @@ pub(crate) fn take(
 ) -> Result<Taken, String> {
     let id = &seed.id;
     let started = api.start_instance(id);
+    let unclaimed = |why: String| {
+        let gen = seed.meta(GEN).unwrap_or("0");
+        Ok(Taken::Failed(format!(
+            "{why}; {}",
+            unclaim(api, id, (owner, desired, name), (key, gen))
+        )))
+    };
     if let Err(err) = wait_for(api, id, &["running"], deadline) {
-        let why = started.err().map_or(err, |e| e.operator_message());
-        return Ok(Taken::Failed(why));
+        return unclaimed(started.err().map_or(err, |e| e.operator_message()));
     }
     let command = script::claim(&desired.lease_id);
     let holder = loop {
         match api.exec_as_root(id, &command) {
             Ok(out) if out.exit_code == 0 => break out.stdout.trim().to_owned(),
             _ if pause(deadline) => {}
-            _ => {
-                return Ok(Taken::Failed(format!(
-                    "claiming {id} inside the Box failed"
-                )))
-            }
+            _ => return unclaimed(format!("claiming {id} inside the Box failed")),
         }
     };
     if holder != desired.lease_id {
@@ -253,16 +298,8 @@ fn make_seed(
     api.stop_instance(id).map_err(|e| e.operator_message())?;
     wait_for(api, id, &["stopped"], deadline)?;
     let gen = now();
-    let meta: Vec<(String, String)> = [
-        ("crabbox_owner", owner),
-        (ROLE, "seed"),
-        (KEY, key),
-        (GEN, &gen.to_string()),
-    ]
-    .iter()
-    .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
-    .collect();
-    api.patch_instance(id, &format!("{}seed.{gen}", prefix(owner)), &meta)
+    let (seed_name, meta) = seed_identity(owner, key, &gen.to_string());
+    api.patch_instance(id, &seed_name, &meta)
         .map_err(|e| e.operator_message())?;
     let older: Vec<String> = api
         .list_instances()

@@ -77,16 +77,51 @@ pub(crate) fn status_of(instance: &Instance) -> &str {
     instance.status.as_deref().unwrap_or("unknown")
 }
 
-/// Finds the single `vm` instance with exactly `name`.
-pub(crate) fn find_by_name(api: &dyn Agent37, name: &str) -> Result<Option<Instance>, String> {
-    let list = api.list_instances().map_err(|e| e.operator_message())?;
-    let mut matches = list
-        .into_iter()
-        .filter(|i| i.name.as_deref() == Some(name) && !crate::cache::is_seed(i));
-    let found = matches.next();
-    if matches.next().is_some() {
-        return Err(format!("more than one instance is named {name}"));
+/// Rank among instances that match one lease: a lease Box first, then one not stopped.
+fn rank(instance: &Instance) -> (bool, bool) {
+    (
+        crate::cache::is_lease(instance),
+        status_of(instance) != "stopped",
+    )
+}
+
+/// The one of `found` a lease means, by [`rank`], with a warning naming the rest; `Err`
+/// gives them all back when the best two rank equal.
+pub(crate) fn pick(
+    mut found: Vec<Instance>,
+    diag: &mut dyn Write,
+) -> Result<Option<Instance>, Vec<Instance>> {
+    found.sort_by_key(|i| std::cmp::Reverse(rank(i)));
+    match found.as_slice() {
+        [best, next, ..] if rank(best) == rank(next) => Err(found),
+        [best, rest @ ..] if !rest.is_empty() => {
+            let others: Vec<&str> = rest.iter().map(|i| i.id.as_str()).collect();
+            let _ = writeln!(
+                diag,
+                "warning: {} matches one lease; using {}, not {}",
+                best.name.as_deref().unwrap_or_default(),
+                best.id,
+                others.join(", ")
+            );
+            Ok(Some(best.clone()))
+        }
+        _ => Ok(found.into_iter().next()),
     }
+}
+
+/// Finds the `vm` instance with exactly `name`, by [`pick`] when several have it.
+pub(crate) fn find_by_name(
+    api: &dyn Agent37,
+    name: &str,
+    diag: &mut dyn Write,
+) -> Result<Option<Instance>, String> {
+    let list = api.list_instances().map_err(|e| e.operator_message())?;
+    let matches = list
+        .into_iter()
+        .filter(|i| i.name.as_deref() == Some(name) && !crate::cache::is_seed(i))
+        .collect();
+    let found =
+        pick(matches, diag).map_err(|_| format!("more than one instance is named {name}"))?;
     match found {
         Some(i) if i.kind.as_deref() != Some("vm") => Err(format!("instance {} is not a VM", i.id)),
         other => Ok(other),
@@ -298,7 +333,7 @@ pub fn acquire(
         owner: &s.owner,
         desired,
     };
-    let existing = find_by_name(api, &name)?;
+    let existing = find_by_name(api, &name, diag)?;
     if existing.is_none() && !cache.plan.is_empty() {
         let pair = (&cache.plan, cache.key.as_str());
         if let Some(seed) = crate::cache::claim(api, &s.owner, desired, &name, pair, diag) {

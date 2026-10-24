@@ -3,8 +3,11 @@
 //! Every operation filters on [`owned`] first, so another owner's instance is
 //! never listed, matched or deleted.
 
+use std::collections::BTreeMap;
+use std::io::Write;
+
 use crate::agent37::{Agent37, ApiError, Instance};
-use crate::lease::{prefix, settings};
+use crate::lease::{pick, prefix, settings};
 use crate::protocol::{LeaseRow, Request};
 
 /// True only when both the name prefix and the owner metadata match.
@@ -57,14 +60,31 @@ fn unlistable(instance: &Instance, owner: &str) -> bool {
                 .is_none_or(str::is_empty))
 }
 
-/// Lists this owner's VM leases, sorted by name then cloud id.
+/// Lists this owner's VM leases, sorted by name then cloud id; of several VMs with one name,
+/// a lease Box that is not stopped, with a warning.
 ///
 /// # Errors
 /// Returns the operator message when config or the API call fails.
-pub fn list(request: &Request, api: &dyn Agent37) -> Result<Vec<LeaseRow>, String> {
+pub fn list(
+    request: &Request,
+    api: &dyn Agent37,
+    diag: &mut dyn Write,
+) -> Result<Vec<LeaseRow>, String> {
     let owner = settings(&request.config)?.owner;
-    let instances = api.list_instances().map_err(|e| e.operator_message())?;
-    let mut rows: Vec<LeaseRow> = instances.iter().filter_map(|i| row(i, &owner)).collect();
+    let mut by_name: BTreeMap<Option<String>, Vec<Instance>> = BTreeMap::new();
+    for instance in api.list_instances().map_err(|e| e.operator_message())? {
+        if row(&instance, &owner).is_some() {
+            by_name
+                .entry(instance.name.clone())
+                .or_default()
+                .push(instance);
+        }
+    }
+    let mut rows: Vec<LeaseRow> = by_name
+        .into_values()
+        .flat_map(|same| pick(same, diag).map_or_else(|all| all, |one| one.into_iter().collect()))
+        .filter_map(|i| row(&i, &owner))
+        .collect();
     rows.sort_by(|a, b| (&a.name, &a.cloud_id).cmp(&(&b.name, &b.cloud_id)));
     Ok(rows)
 }
