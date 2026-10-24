@@ -12,8 +12,8 @@ use crate::protocol::{CacheVolumeEcho, Desired, Lease};
 pub(super) struct CacheCtx<'a> {
     /// Validated volumes.
     pub(super) plan: Plan,
-    /// Seed key of the plan and VM shape.
-    pub(super) key: String,
+    /// Seed key; `None` without a valid cache scope, so the Box is never seeded.
+    pub(super) key: Option<String>,
     /// Owner label.
     pub(super) owner: &'a str,
     /// The lease.
@@ -37,7 +37,7 @@ pub(super) fn ready(
     let echo = if cache.plan.is_empty() {
         cache.plan.echo(&[], None)
     } else {
-        let pair = (&cache.plan, cache.key.as_str());
+        let pair = (&cache.plan, cache.key.as_deref());
         match crate::cache::setup(
             api,
             instance,
@@ -68,9 +68,10 @@ pub(super) fn from_seed(
     timeout: u64,
     diag: &mut dyn Write,
 ) -> Option<(String, Vec<CacheVolumeEcho>)> {
+    let key = cache.key.as_deref()?;
     let deadline = Instant::now() + Duration::from_secs(timeout);
     let lease = (cache.owner, cache.desired, name);
-    let taken = crate::cache::take(api, seed, lease, (&cache.plan, &cache.key), deadline);
+    let taken = crate::cache::take(api, seed, lease, (&cache.plan, key), deadline);
     let result = match taken {
         Ok(Taken::Ours(now)) => ready(api, &now, (true, true), cache, deadline, diag),
         Ok(Taken::Lost) => {

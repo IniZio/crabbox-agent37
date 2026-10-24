@@ -106,6 +106,7 @@ pub fn resolve(
         name,
         class: None,
         cache_volumes: Vec::new(),
+        cache_scope: None,
     };
     build_lease(ident, &instance.id, status, host_key, proxy)
 }

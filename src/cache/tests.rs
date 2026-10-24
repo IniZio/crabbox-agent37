@@ -85,31 +85,46 @@ fn plan_skips_bad_and_duplicate_entries() {
 }
 
 #[test]
-fn seed_key_covers_groups_shape_template_and_region() {
-    let a = Plan::new(&[
-        req("g1", "npm", &["~/.npm"], false),
-        req("g2x", "docker", &["~/docker"], true),
-    ]);
-    let b = Plan::new(&[
-        req("g2x", "docker", &["~/docker"], true),
-        req("g1", "yarn", &["~/.cache/yarn"], false),
-    ]);
-    let base = a.key(&shape(2, None));
+fn seed_key_covers_scope_owner_shape_template_and_region() {
+    const A: &str = "0123456789abcdef";
+    let base = seed_key(A, "me", &shape(2, None));
     assert_eq!(base.len(), 16);
-    assert_eq!(
-        base,
-        b.key(&shape(2, None)),
-        "names and order do not matter"
-    );
-    assert_ne!(base, a.key(&shape(4, None)));
-    assert_ne!(base, a.key(&shape(2, Some("custom"))));
+    assert_eq!(base, seed_key(A, "me", &shape(2, None)));
+    assert_ne!(base, seed_key("fedcba9876543210", "me", &shape(2, None)));
+    assert_ne!(base, seed_key(A, "you", &shape(2, None)));
+    assert_ne!(base, seed_key(A, "me", &shape(4, None)));
+    assert_ne!(base, seed_key(A, "me", &shape(2, Some("custom"))));
     let eu = Shape {
         region: "eu",
         ..shape(2, None)
     };
-    assert_ne!(base, a.key(&eu), "a seed never crosses regions");
-    let fewer = Plan::new(&[req("g1", "npm", &["~/.npm"], false)]);
-    assert_ne!(base, fewer.key(&shape(2, None)));
+    assert_ne!(base, seed_key(A, "me", &eu), "a seed never crosses regions");
+}
+
+#[test]
+fn only_sixteen_lowercase_hex_is_a_scope() {
+    let mut diag = Vec::new();
+    assert_eq!(
+        scope(Some("0123456789abcdef"), &mut diag),
+        Some("0123456789abcdef")
+    );
+    assert!(diag.is_empty());
+    assert_eq!(scope(None, &mut diag), None);
+    assert!(diag.is_empty(), "an absent scope is not reported");
+    for bad in [
+        "0123456789ABCDEF",
+        "0123456789abcde",
+        "0123456789abcdef0",
+        "g123456789abcdef",
+        "",
+    ] {
+        let mut diag = Vec::new();
+        assert_eq!(scope(Some(bad), &mut diag), None, "{bad}");
+        assert!(
+            String::from_utf8(diag).unwrap().contains("cacheScope"),
+            "{bad}"
+        );
+    }
 }
 
 #[test]

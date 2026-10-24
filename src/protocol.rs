@@ -80,6 +80,8 @@ pub struct Desired {
     pub class: Option<String>,
     /// Cache volumes to restore, acquire only.
     pub cache_volumes: Vec<CacheVolumeRequest>,
+    /// Cache scope as sent, unvalidated; acquire only.
+    pub cache_scope: Option<String>,
 }
 
 /// Identifiers crabbox expects an existing lease to carry.
@@ -271,6 +273,7 @@ pub fn parse_request(input: &[u8]) -> Result<Request, String> {
             name: required("name")?,
             class: opt_str(o, "class"),
             cache_volumes: cache::parse_cache_volumes(o)?,
+            cache_scope: cache::parse_cache_scope(o),
         })
     })?;
     let expected = optional_object(object, "expected", |o| {

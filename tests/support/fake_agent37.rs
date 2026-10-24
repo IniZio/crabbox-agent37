@@ -449,7 +449,7 @@ fn route(request: &RecordedRequest, state: &Mutex<State>) -> (u16, Value) {
             let id = path
                 .trim_start_matches("/v1/instances/")
                 .trim_end_matches("/stop");
-            set_power(&mut state, id, false)
+            cache::refused_stop(&state, id).unwrap_or_else(|| set_power(&mut state, id, false))
         }
         ("POST", _) if path.starts_with("/v1/instances/") && path.ends_with("/start") => {
             let id = path
@@ -586,7 +586,8 @@ fn exec(state: &mut State, id: &str, body: &str) -> (u16, Value) {
     } else if parsed["user"] == "root" && command.starts_with(": crabbox-tools-install; ") {
         (200, tool_install(state))
     } else if parsed["user"] == "root" && command.starts_with(": crabbox-cache-") {
-        (200, cache::run_script(state, id, command))
+        cache::refused_exec(state, command)
+            .unwrap_or_else(|| (200, cache::run_script(state, id, command)))
     } else if parsed["user"] == "root" && command.starts_with(": crabbox-docker-root; ") {
         (200, state.docker_root.run(id))
     } else {
