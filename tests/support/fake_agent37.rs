@@ -449,7 +449,7 @@ fn route(request: &RecordedRequest, state: &Mutex<State>) -> (u16, Value) {
             let id = path
                 .trim_start_matches("/v1/instances/")
                 .trim_end_matches("/stop");
-            cache::refused_stop(&state, id).unwrap_or_else(|| set_power(&mut state, id, false))
+            cache::refused_stop(&mut state, id).unwrap_or_else(|| set_power(&mut state, id, false))
         }
         ("POST", _) if path.starts_with("/v1/instances/") && path.ends_with("/start") => {
             let id = path
