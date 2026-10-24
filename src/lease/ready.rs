@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use super::fetch_host_key;
 use crate::agent37::{Agent37, Instance};
-use crate::cache::Plan;
+use crate::cache::{Plan, Taken};
 use crate::protocol::{CacheVolumeEcho, Desired, Lease};
 
 /// The cache volumes of one acquire: the plan, its seed key, and the lease they serve.
@@ -59,23 +59,44 @@ pub(super) fn ready(
     Ok((fetch_host_key(api, id, deadline)?, echo))
 }
 
-/// Starts and readies a claimed seed; on any failure deletes it so the caller goes cold.
+/// Starts, claims and readies a claimed seed; `None` means create cold. It deletes the seed
+/// only when this lease won the claim inside the Box and the seed then failed.
 pub(super) fn from_seed(
     api: &dyn Agent37,
     seed: &Instance,
-    cache: &CacheCtx<'_>,
+    (cache, name): (&CacheCtx<'_>, &str),
     timeout: u64,
     diag: &mut dyn Write,
 ) -> Option<(String, Vec<CacheVolumeEcho>)> {
     let deadline = Instant::now() + Duration::from_secs(timeout);
-    let result = crate::cache::start(api, &seed.id, deadline)
-        .and_then(|()| ready(api, seed, (true, true), cache, deadline, diag));
+    let lease = (cache.owner, cache.desired, name);
+    let taken = crate::cache::take(api, seed, lease, (&cache.plan, &cache.key), deadline);
+    let result = match taken {
+        Ok(Taken::Ours(now)) => ready(api, &now, (true, true), cache, deadline, diag),
+        Ok(Taken::Lost) => {
+            let _ = writeln!(
+                diag,
+                "acquire: lost seed {} inside the Box; creating cold",
+                seed.id
+            );
+            return None;
+        }
+        Ok(Taken::Failed(err)) => {
+            let _ = writeln!(
+                diag,
+                "acquire: seed {} failed ({err}); creating cold",
+                seed.id
+            );
+            return None;
+        }
+        Err(err) => Err(err),
+    };
     match result {
         Ok(done) => Some(done),
         Err(err) => {
             let _ = writeln!(
                 diag,
-                "acquire: seed {} failed ({err}); creating cold",
+                "acquire: seed {} failed ({err}); deleting it, creating cold",
                 seed.id
             );
             let _ = api.delete_instance(&seed.id);

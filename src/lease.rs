@@ -289,6 +289,7 @@ pub fn acquire(
         memory_gb,
         disk_gb,
         template: s.template.as_deref(),
+        region: &s.region,
     };
     let plan = Plan::new(&desired.cache_volumes);
     let cache = CacheCtx {
@@ -301,7 +302,7 @@ pub fn acquire(
     if existing.is_none() && !cache.plan.is_empty() {
         let pair = (&cache.plan, cache.key.as_str());
         if let Some(seed) = crate::cache::claim(api, &s.owner, desired, &name, pair, diag) {
-            if let Some((key, echo)) = from_seed(api, &seed, &cache, s.timeout, diag) {
+            if let Some((key, echo)) = from_seed(api, &seed, (&cache, &name), s.timeout, diag) {
                 return with_echo(
                     build_lease(desired.clone(), &seed.id, "ready", Some(key), proxy),
                     echo,
