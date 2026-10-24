@@ -34,6 +34,15 @@ pub struct CacheVolumeEcho {
     pub detail: String,
 }
 
+/// `desired.cacheScope` as sent, a non-string as its JSON text; `cache::scope` validates it.
+pub(super) fn parse_cache_scope(desired: &serde_json::Map<String, Value>) -> Option<String> {
+    match desired.get("cacheScope")? {
+        Value::Null => None,
+        Value::String(s) => Some(s.clone()),
+        other => Some(other.to_string()),
+    }
+}
+
 /// Parses `desired.cacheVolumes`; absent or null is empty.
 pub(super) fn parse_cache_volumes(
     desired: &serde_json::Map<String, Value>,
