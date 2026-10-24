@@ -85,8 +85,10 @@ pub(super) fn sealed(plan: &Plan) -> String {
 }
 
 /// Readies a released Box to become a seed: empties each sealed volume missing a marker in
-/// any of its dirs, then strips `/root` down to the store, `.ssh` and the links into the
-/// store. A kept `/root/docker` link lets the seed boot straight onto its data.
+/// any of its dirs, then strips `/root` down to the store, `.ssh`, agent37's `.agent37` and
+/// the links into the store. A kept `/root/docker` link lets the seed boot straight onto its
+/// data. A mount point, such as the `/root/docker` agent37's init binds when no volume
+/// replaced it, cannot be removed, so it is emptied without crossing into other mounts.
 ///
 /// agent37's stop halts the VM without signalling its processes, and dockerd cannot be
 /// stopped first because its exit ends the VM's entrypoint. So the script freezes `/root`,
@@ -107,7 +109,7 @@ pub(super) fn release(sealed: &str) -> Result<String, String> {
     }
     let _ = write!(
         s,
-        r#"find "$P{HOME}" -mindepth 1 -maxdepth 1 ! -name {STORE_DIR} ! -name .ssh ! -lname "$C/*" -exec rm -rf -- {{}} +; sync; fsfreeze -f "$P{HOME}""#
+        r#"find "$P{HOME}" -mindepth 1 -maxdepth 1 ! -name {STORE_DIR} ! -name .ssh ! -name .agent37 ! -lname "$C/*" -exec sh -c 'for e; do if mountpoint -q "$e"; then find "$e" -mindepth 1 -xdev -delete; else rm -rf -- "$e"; fi; done' strip {{}} +; sync; fsfreeze -f "$P{HOME}""#
     );
     Ok(s)
 }
