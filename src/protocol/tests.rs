@@ -121,6 +121,7 @@ fn lease_response_shape() {
             ready_check: "true".to_owned(),
             host_key: None,
         },
+        cache_volumes: Vec::new(),
     };
     let base = r#"{"protocolVersion":1,"lease":{"leaseId":"l1","slug":"s","name":"n","cloudId":"vm1","status":"ready","ssh":{"user":"root","host":"vm1.agent37.app","port":"22","proxyCommand":"x tunnel %h","readyCheck":"true""#;
     assert_eq!(lease_response(&lease), format!("{base}}}}}}}"));
@@ -197,4 +198,61 @@ fn leases_response_uses_camel_case() {
 #[test]
 fn ok_response_is_bare_version() {
     assert_eq!(ok_response(), r#"{"protocolVersion":1}"#);
+}
+
+/// `desired` with the given `cacheVolumes` JSON.
+fn with_volumes(volumes: &str) -> Result<Request, String> {
+    parse(&format!(
+        r#""desired":{{"leaseId":"l","slug":"s","name":"n","cacheVolumes":{volumes}}}}}"#
+    ))
+}
+
+#[test]
+fn parses_cache_volumes_and_rejects_bad_shapes() {
+    let req = with_volumes(
+        r#"[{"group":"g","name":"docker","key":"g-docker","paths":["~/docker"],"sizeGB":3,"sealed":true}]"#,
+    )
+    .unwrap();
+    let volumes = req.desired.unwrap().cache_volumes;
+    assert_eq!(
+        volumes,
+        [CacheVolumeRequest {
+            group: "g".into(),
+            name: "docker".into(),
+            key: "g-docker".into(),
+            paths: vec!["~/docker".into()],
+            size_gb: 3,
+            sealed: true,
+        }]
+    );
+    assert!(with_volumes("null")
+        .unwrap()
+        .desired
+        .unwrap()
+        .cache_volumes
+        .is_empty());
+    for bad in [
+        "{}",
+        "[1]",
+        r#"[{"paths":"x"}]"#,
+        r#"[{"paths":[1]}]"#,
+        r#"[{"sizeGB":-1}]"#,
+        r#"[{"sealed":"y"}]"#,
+    ] {
+        assert!(with_volumes(bad).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn cache_echo_serialises_name_outcome_and_detail() {
+    let echo = CacheVolumeEcho {
+        name: "npm".into(),
+        outcome: "restored".into(),
+        detail: "gen 1".into(),
+    };
+    let text = serde_json::to_string(&echo).unwrap();
+    assert_eq!(
+        text,
+        r#"{"name":"npm","outcome":"restored","detail":"gen 1"}"#
+    );
 }

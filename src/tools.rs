@@ -229,6 +229,14 @@ mod tests {
         fn start_instance(&self, _: &str) -> Result<(), ApiError> {
             Err(ApiError::Decode("unused".into()))
         }
+        fn patch_instance(
+            &self,
+            _: &str,
+            _: &str,
+            _: &[(String, String)],
+        ) -> Result<crate::agent37::Instance, ApiError> {
+            Err(ApiError::Decode("unused".into()))
+        }
     }
 
     /// Successful exec with the given stdout.
