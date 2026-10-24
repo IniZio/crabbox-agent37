@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use fake_agent37::FakeAgent37;
+use fake_agent37::{FakeAgent37, StartFault};
 use serde_json::{json, Value};
 
 /// Key the fake accepts.
@@ -514,4 +514,66 @@ fn release_freezes_root_before_the_stop() {
         format!("-f {}", root.join("root").display())
     );
     assert_eq!(instance(&fake, &lease["cloudId"])["status"], "stopped");
+}
+
+/// Releases lease 1 into a seed, makes its claim's start fail as `fault` says, and acquires
+/// lease 2; returns the seed's id and lease 2, after checking lease 2 went cold onto the only
+/// Box carrying its name.
+fn seed_start_fails(fake: &FakeAgent37, fault: StartFault) -> (Value, Value) {
+    let first = acquire(fake, 1, "standard");
+    assert_eq!(release(fake, &first), 0);
+    fake.fail_next_start(fault);
+    let second = acquire(fake, 2, "standard");
+    assert_ne!(second["cloudId"], first["cloudId"]);
+    assert_eq!(outcomes(&second), all("empty"), "lease 2 goes cold");
+    let named: Vec<Value> = fake
+        .instances()
+        .into_iter()
+        .filter(|i| i["name"] == "crabbox-me--box-2")
+        .map(|i| i["id"].clone())
+        .collect();
+    assert_eq!(
+        named,
+        [second["cloudId"].clone()],
+        "one Box has lease 2's name"
+    );
+    (first["cloudId"].clone(), second)
+}
+
+#[test]
+fn a_seed_whose_start_fails_before_its_claim_returns_to_the_seeds() {
+    let fake = FakeAgent37::start_with_key(KEY);
+    let (seed, _) = seed_start_fails(&fake, StartFault::Fails);
+    let now = instance(&fake, &seed);
+    assert_eq!(now["metadata"]["crabbox_role"], "seed");
+    let gen = now["metadata"]["crabbox_seed_gen"].as_str().unwrap();
+    assert_eq!(now["name"], format!("crabbox-me--seed.{gen}"));
+}
+
+#[test]
+fn a_seed_that_cannot_be_returned_after_a_failed_start_is_deleted() {
+    let fake = FakeAgent37::start_with_key(KEY);
+    let (seed, _) = seed_start_fails(&fake, StartFault::ThenPatchesFail);
+    assert_eq!(instance(&fake, &seed), Value::Null);
+}
+
+#[test]
+fn a_seed_another_lease_took_before_a_failed_start_is_left_alone() {
+    let fake = FakeAgent37::start_with_key(KEY);
+    let (seed, _) = seed_start_fails(&fake, StartFault::AfterRivalClaim);
+    let now = instance(&fake, &seed);
+    assert_eq!(now["name"], "crabbox-me--rival");
+    assert_eq!(now["metadata"]["crabbox_lease_id"], "cbx_rival");
+    let start = format!("/v1/instances/{}/start", seed.as_str().unwrap());
+    let from = fake
+        .requests()
+        .iter()
+        .position(|r| r.path == start)
+        .unwrap();
+    assert_eq!(
+        calls(&fake, from, "PATCH", &seed, ""),
+        0,
+        "no write after the start"
+    );
+    assert_eq!(calls(&fake, from, "DELETE", &seed, ""), 0);
 }

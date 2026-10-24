@@ -28,6 +28,8 @@ struct Outcome {
     code: i32,
     /// Parsed stdout.
     stdout: Value,
+    /// Diagnostics.
+    stderr: String,
 }
 
 /// Runs the binary with `request` on stdin.
@@ -50,6 +52,7 @@ fn run(request: &Value) -> Outcome {
         code: output.status.code().unwrap(),
         stdout: serde_json::from_str(&stdout)
             .unwrap_or_else(|e| panic!("bad stdout {stdout:?}: {e}")),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
     }
 }
 
@@ -310,4 +313,47 @@ fn resolve_release_only_skips_exec_for_a_stopped_instance() {
         .filter(|p| p.ends_with("/exec"))
         .collect();
     assert!(execs.is_empty(), "exec sent: {execs:?}");
+}
+
+#[test]
+fn list_and_resolve_use_the_running_lease_box_of_two_with_one_name() {
+    let fake = FakeAgent37::start_with_key(KEY);
+    for (id, role, status) in [
+        ("vmstale", "lease", "stopped"),
+        ("vmlive", "lease", "running"),
+        ("vmnorole", "", "running"),
+    ] {
+        fake.add_instance_with_metadata(
+            id,
+            "crabbox-alice--name-1",
+            "vm",
+            status,
+            &[
+                ("crabbox_owner", "alice"),
+                ("crabbox_role", role),
+                ("crabbox_lease_id", "cbx_000000000001"),
+                ("crabbox_slug", "slug-1"),
+            ],
+        );
+    }
+    let listed = run(&request(&fake, "list", &json!({})));
+    assert_eq!(listed.code, 0, "{}", listed.stdout);
+    let ids: Vec<&Value> = listed.stdout["leases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| &l["cloudId"])
+        .collect();
+    assert_eq!(ids, ["vmlive"]);
+    let desired = json!({ "leaseId": "cbx_000000000001", "slug": "slug-1", "name": "name-1" });
+    let resolved = run(&request(&fake, "resolve", &json!({ "desired": desired })));
+    assert_eq!(resolved.code, 0, "{}", resolved.stdout);
+    assert_eq!(resolved.stdout["lease"]["cloudId"], "vmlive");
+    for out in [&listed, &resolved] {
+        assert!(
+            out.stderr.contains("vmlive") && out.stderr.contains("vmstale"),
+            "warning names both: {}",
+            out.stderr
+        );
+    }
 }
