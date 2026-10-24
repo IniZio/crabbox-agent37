@@ -85,6 +85,13 @@ pub(super) fn patch(state: &mut State, id: &str, body: &str) -> (u16, Value) {
     if state.rivals.patch_blocked.as_deref() == Some(id) {
         return (500, nested_error("internal", "Patch failed."));
     }
+    let lost = match state.rivals.patch_lost.take() {
+        Some((lost, then_fail)) if lost == id => Some(then_fail),
+        other => {
+            state.rivals.patch_lost = other;
+            None
+        }
+    };
     let parsed: Value = serde_json::from_str(body).unwrap_or(Value::Null);
     let steal = state.rivals.steal_claims;
     let Some(instance) = state.instances.iter_mut().find(|i| i["id"] == id) else {
@@ -107,7 +114,29 @@ pub(super) fn patch(state: &mut State, id: &str, body: &str) -> (u16, Value) {
         instance["name"] = json!(format!("crabbox-{}--rival", owner.as_str().unwrap_or("")));
         instance["metadata"]["crabbox_lease_id"] = json!("cbx_rival");
     }
-    (200, instance.clone())
+    let answer = instance.clone();
+    match lost {
+        Some(then_fail) => {
+            if then_fail {
+                state.rivals.patch_blocked = Some(id.to_owned());
+            }
+            (504, nested_error("timeout", "Patch timed out."))
+        }
+        None => (200, answer),
+    }
+}
+
+/// Gives instance `id` to a rival lease that claimed and started it, inside the Box too.
+fn rival_claim(state: &mut State, id: &str) {
+    let run = state.boxes.path().join(id).join("run");
+    std::fs::create_dir_all(&run).unwrap();
+    let _ = std::os::unix::fs::symlink("cbx_rival", run.join("crabbox-claim"));
+    if let Some(i) = state.instances.iter_mut().find(|i| i["id"] == id) {
+        i["name"] = json!("crabbox-me--rival");
+        i["metadata"]["crabbox_lease_id"] = json!("cbx_rival");
+        i["metadata"]["crabbox_role"] = json!("lease");
+        i["status"] = json!("running");
+    }
 }
 
 impl FakeAgent37 {
@@ -133,16 +162,18 @@ pub(super) struct Rivals {
     steal_claims: bool,
     /// Two acquires racing for one seed, when armed.
     race: Option<Race>,
-    /// Seed a rival claims and starts right after the next list.
-    taken_after_list: Option<String>,
+    /// Seed a rival claims and starts right after the given count of further lists.
+    taken_after_list: Option<(String, u32)>,
     /// How the next `start` fails, when armed.
     start_fault: Option<StartFault>,
     /// Instance whose `PATCH`es fail.
     patch_blocked: Option<String>,
+    /// Instance whose next `PATCH` lands but answers a timeout, and whether later ones fail.
+    patch_lost: Option<(String, bool)>,
     /// Whether every claim inside a Box fails.
     claim_fails: bool,
-    /// Instance whose `stop`s fail.
-    stop_blocked: Option<String>,
+    /// Instance whose `stop`s fail, and whether a rival claims it at the first one.
+    stop_blocked: Option<(String, bool)>,
 }
 
 /// How the fake fails the next `start`: the Box reports `failed` and the call answers 500.
@@ -159,6 +190,8 @@ pub(crate) enum StartFault {
     ClaimFails,
     /// As [`StartFault::ClaimFails`], and every later `stop` of that Box fails.
     ClaimFailsThenStopFails,
+    /// As [`StartFault::ClaimFailsThenStopFails`], and a rival claims the Box at that stop.
+    ClaimFailsThenRivalAtStop,
 }
 
 /// The answer to an `exec` of `command` that the armed faults refuse.
@@ -168,20 +201,29 @@ pub(super) fn refused_exec(state: &State, command: &str) -> Option<(u16, Value)>
 }
 
 /// The answer to a `stop` of `id` that the armed faults refuse.
-pub(super) fn refused_stop(state: &State, id: &str) -> Option<(u16, Value)> {
-    (state.rivals.stop_blocked.as_deref() == Some(id))
-        .then(|| (500, nested_error("internal", "Stop failed.")))
+pub(super) fn refused_stop(state: &mut State, id: &str) -> Option<(u16, Value)> {
+    let (blocked, rival) = state.rivals.stop_blocked.as_mut()?;
+    if blocked != id {
+        return None;
+    }
+    if std::mem::take(rival) {
+        rival_claim(state, id);
+    }
+    Some((500, nested_error("internal", "Stop failed.")))
 }
 
 /// Fails `start` of `id` when a fault is armed; `None` lets it start.
 pub(super) fn start(state: &mut State, id: &str) -> Option<(u16, Value)> {
     let fault = state.rivals.start_fault.take()?;
     match fault {
-        StartFault::ClaimFails | StartFault::ClaimFailsThenStopFails => {
+        StartFault::ClaimFails => {
             state.rivals.claim_fails = true;
-            if matches!(fault, StartFault::ClaimFailsThenStopFails) {
-                state.rivals.stop_blocked = Some(id.to_owned());
-            }
+            return None;
+        }
+        StartFault::ClaimFailsThenStopFails | StartFault::ClaimFailsThenRivalAtStop => {
+            state.rivals.claim_fails = true;
+            let rival = matches!(fault, StartFault::ClaimFailsThenRivalAtStop);
+            state.rivals.stop_blocked = Some((id.to_owned(), rival));
             return None;
         }
         _ => {}
@@ -189,7 +231,10 @@ pub(super) fn start(state: &mut State, id: &str) -> Option<(u16, Value)> {
     let instance = state.instances.iter_mut().find(|i| i["id"] == id)?;
     instance["status"] = json!("failed");
     match fault {
-        StartFault::Fails | StartFault::ClaimFails | StartFault::ClaimFailsThenStopFails => {}
+        StartFault::Fails
+        | StartFault::ClaimFails
+        | StartFault::ClaimFailsThenStopFails
+        | StartFault::ClaimFailsThenRivalAtStop => {}
         StartFault::ThenPatchesFail => state.rivals.patch_blocked = Some(id.to_owned()),
         StartFault::AfterRivalClaim => {
             instance["name"] = json!("crabbox-me--rival");
@@ -214,10 +259,12 @@ pub(super) struct Race {
     answered: u32,
     /// `PATCH`es answered before the latest read of an instance.
     read_after: u32,
+    /// Reads of an instance before any `PATCH` was answered.
+    early_reads: u32,
 }
 
-/// Holds requests so two claims interleave: both acquires list the seed (two lists each),
-/// then the first `PATCH`es and reads it back, then the second does, and only then may
+/// Holds requests so two claims interleave: both acquires list the seed (two lists each) and
+/// read it again, then the first `PATCH`es and reads it back, then the second does, and only then may
 /// either start it. The first acquire waits at its start, so the read after the second
 /// `PATCH` is the second acquire's.
 pub(super) fn hold(state: &Mutex<State>, method: &str, path: &str) {
@@ -239,7 +286,7 @@ pub(super) fn hold(state: &Mutex<State>, method: &str, path: &str) {
     while Instant::now() < deadline {
         let s = state.lock().unwrap();
         let ready = s.rivals.race.as_ref().is_some_and(|r| match slot {
-            0 => r.lists >= 4,
+            0 => r.lists >= 4 && r.early_reads >= 2,
             1 => r.read_after >= 1,
             u32::MAX => r.read_after >= 2,
             _ => true,
@@ -258,16 +305,18 @@ pub(super) fn observe(state: &mut State, method: &str, path: &str) {
         match (method, path) {
             ("GET", "/v1/instances") => race.lists += 1,
             ("PATCH", _) => race.answered += 1,
-            ("GET", _) => race.read_after = race.answered,
+            ("GET", _) => {
+                race.early_reads += u32::from(race.answered == 0);
+                race.read_after = race.answered;
+            }
             _ => {}
         }
     }
     if (method, path) == ("GET", "/v1/instances") {
-        if let Some(id) = state.rivals.taken_after_list.take() {
-            if let Some(i) = state.instances.iter_mut().find(|i| i["id"] == id) {
-                i["metadata"]["crabbox_role"] = json!("lease");
-                i["status"] = json!("running");
-            }
+        match state.rivals.taken_after_list.take() {
+            Some((id, 1)) => rival_claim(state, &id),
+            Some((id, n)) => state.rivals.taken_after_list = Some((id, n - 1)),
+            None => {}
         }
     }
 }
@@ -278,7 +327,7 @@ pub(super) fn stop(state: &State, id: &str) {
 }
 
 impl FakeAgent37 {
-    /// Makes the next two acquires race for one seed (see [`hold_patch`]).
+    /// Makes the next two acquires race for one seed (see [`hold`]).
     #[allow(dead_code, reason = "each test binary uses a different subset")]
     pub(crate) fn start_race(&self) {
         self.lock().rivals.race = Some(Race::default());
@@ -290,9 +339,16 @@ impl FakeAgent37 {
         self.lock().rivals.start_fault = Some(fault);
     }
 
-    /// Makes a rival claim and start seed `id` right after the next list is answered.
+    /// Makes a rival claim and start seed `id` right after `lists` more lists are answered.
     #[allow(dead_code, reason = "each test binary uses a different subset")]
-    pub(crate) fn take_after_list(&self, id: &str) {
-        self.lock().rivals.taken_after_list = Some(id.to_owned());
+    pub(crate) fn take_after_list(&self, id: &str, lists: u32) {
+        self.lock().rivals.taken_after_list = Some((id.to_owned(), lists));
+    }
+
+    /// Makes the next `PATCH` of `id` land but answer a timeout; with `then_fail`, every later
+    /// `PATCH` of `id` fails.
+    #[allow(dead_code, reason = "each test binary uses a different subset")]
+    pub(crate) fn lose_next_patch(&self, id: &str, then_fail: bool) {
+        self.lock().rivals.patch_lost = Some((id.to_owned(), then_fail));
     }
 }

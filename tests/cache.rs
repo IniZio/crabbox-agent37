@@ -339,7 +339,7 @@ fn cleanup_spares_a_seed_claimed_after_it_listed() {
             ("crabbox_seed_gen", &old),
         ],
     );
-    fake.take_after_list("s1");
+    fake.take_after_list("s1", 1);
     let config = config(&fake, &json!({}));
     let (code, out) = run(&json!({"protocolVersion": 1, "operation": "cleanup", "config": config}));
     assert_eq!(code, 0, "{out}");

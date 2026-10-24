@@ -12,7 +12,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::gc::delete_seeds;
 use super::{script, Plan};
-use crate::agent37::{Agent37, Instance};
+use crate::agent37::{Agent37, ApiError, Instance};
 use crate::docker_root::{reboot, wait_for};
 use crate::inventory::owned;
 use crate::lease::{pause, prefix, status_of};
@@ -101,8 +101,10 @@ pub(super) fn lock(owner: &str) -> Option<File> {
 }
 
 /// Claims the newest stopped seed of `key` for the lease named `name`; `None` means create
-/// cold. The returned instance already carries the lease's name and metadata, but another
-/// host may hold it too until [`take`] settles it. Without the host lock it goes cold.
+/// cold. The seed is read again right before the `PATCH`, since another host may have taken
+/// it since the list. The returned instance already carries the lease's name and metadata,
+/// but another host may hold it too until [`take`] settles it. Without the host lock it goes
+/// cold.
 pub(crate) fn claim(
     api: &dyn Agent37,
     owner: &str,
@@ -111,7 +113,7 @@ pub(crate) fn claim(
     (plan, key): (&Plan, &str),
     diag: &mut dyn Write,
 ) -> Option<Instance> {
-    let Some(_guard) = lock(owner) else {
+    let Some(guard) = lock(owner) else {
         let _ = writeln!(diag, "acquire: no claim lock; creating cold");
         return None;
     };
@@ -121,9 +123,29 @@ pub(crate) fn claim(
         .into_iter()
         .filter(|i| stopped_seed(i, owner, Some(key)))
         .max_by_key(|i| (generation(i), i.id.clone()))?;
+    if !api
+        .get_instance(&seed.id)
+        .is_ok_and(|i| stopped_seed(&i, owner, Some(key)))
+    {
+        let _ = writeln!(diag, "acquire: seed {} was taken after the list", seed.id);
+        return None;
+    }
     let gen = seed.meta(GEN).unwrap_or("0").to_owned();
     let meta = lease_metadata(owner, desired, plan, key, Some(&gen));
-    let now = write_lease(api, &seed.id, name, &meta)?;
+    let now = match write_lease(api, &seed.id, name, &meta) {
+        Ok(now) => now,
+        Err(err) => {
+            drop(guard);
+            let did = unclaim(api, &seed.id, (owner, desired, name), (key, &gen));
+            let _ = writeln!(
+                diag,
+                "acquire: claiming seed {} failed: {}; {did}",
+                seed.id,
+                err.operator_message()
+            );
+            return None;
+        }
+    };
     let won = holds(&now, name, desired);
     let _ = if won {
         writeln!(diag, "acquire: claimed seed {} (gen {gen})", now.id)
@@ -133,15 +155,16 @@ pub(crate) fn claim(
     won.then_some(now)
 }
 
-/// `PATCH`es the lease's name and metadata onto `id`, then reads it back.
+/// `PATCH`es the lease's name and metadata onto `id`, then reads it back. A failed `PATCH`
+/// may still have landed.
 fn write_lease(
     api: &dyn Agent37,
     id: &str,
     name: &str,
     meta: &[(String, String)],
-) -> Option<Instance> {
-    let patched = api.patch_instance(id, name, meta).ok()?;
-    Some(api.get_instance(id).unwrap_or(patched))
+) -> Result<Instance, ApiError> {
+    let patched = api.patch_instance(id, name, meta)?;
+    Ok(api.get_instance(id).unwrap_or(patched))
 }
 
 /// True when `instance` carries the lease's name and id and is no longer a seed.
@@ -151,7 +174,8 @@ fn holds(instance: &Instance, name: &str, desired: &Desired) -> bool {
         && !is_seed(instance)
 }
 
-/// Gives back a claimed seed that failed before its in-Box claim, so the cold Box made next
+/// Gives back a claimed seed that failed before its in-Box claim, or whose claim `PATCH`
+/// failed but may have landed, so the cold Box made next
 /// is the only one named for this lease. A Box still carrying this lease gets its seed name
 /// and metadata again, or is deleted when a fresh read does not show that; a Box carrying
 /// another lease, or unreadable, is left alone. A returned seed that is not stopped is
@@ -253,7 +277,7 @@ pub(crate) fn take(
     }
     let meta = lease_metadata(owner, desired, plan, key, seed.meta(GEN));
     match write_lease(api, id, name, &meta) {
-        Some(now) if holds(&now, name, desired) => Ok(Taken::Ours(now)),
+        Ok(now) if holds(&now, name, desired) => Ok(Taken::Ours(now)),
         _ => Err(format!("{id} does not carry this lease after its claim")),
     }
 }
@@ -338,7 +362,7 @@ pub(crate) fn release(
     owner: &str,
     instance: &Instance,
     timeout: u64,
-) -> Result<(), crate::agent37::ApiError> {
+) -> Result<(), ApiError> {
     let seeded = instance.meta(KEY).is_some()
         && status_of(instance) == "running"
         && make_seed(api, owner, instance, timeout).is_ok();
