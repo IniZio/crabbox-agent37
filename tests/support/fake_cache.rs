@@ -77,6 +77,9 @@ pub(super) fn run_script(state: &State, id: &str, command: &str) -> Value {
 /// Handles `PATCH /v1/instances/{id}`: sets `name` and merges `metadata` into the stored
 /// keys, as agent37 does.
 pub(super) fn patch(state: &mut State, id: &str, body: &str) -> (u16, Value) {
+    if state.rivals.patch_blocked.as_deref() == Some(id) {
+        return (500, nested_error("internal", "Patch failed."));
+    }
     let parsed: Value = serde_json::from_str(body).unwrap_or(Value::Null);
     let steal = state.rivals.steal_claims;
     let Some(instance) = state.instances.iter_mut().find(|i| i["id"] == id) else {
@@ -127,6 +130,42 @@ pub(super) struct Rivals {
     race: Option<Race>,
     /// Seed a rival claims and starts right after the next list.
     taken_after_list: Option<String>,
+    /// How the next `start` fails, when armed.
+    start_fault: Option<StartFault>,
+    /// Instance whose `PATCH`es fail.
+    patch_blocked: Option<String>,
+}
+
+/// How the fake fails the next `start`: the Box reports `failed` and the call answers 500.
+#[derive(Clone, Copy)]
+#[allow(dead_code, reason = "each test binary uses a different subset")]
+pub(crate) enum StartFault {
+    /// Nothing else happens.
+    Fails,
+    /// Every later `PATCH` of that Box fails too.
+    ThenPatchesFail,
+    /// A rival lease claimed the Box just before.
+    AfterRivalClaim,
+}
+
+/// Fails `start` of `id` when a fault is armed; `None` lets it start.
+pub(super) fn start(state: &mut State, id: &str) -> Option<(u16, Value)> {
+    let fault = state.rivals.start_fault.take()?;
+    let instance = state.instances.iter_mut().find(|i| i["id"] == id)?;
+    instance["status"] = json!("failed");
+    match fault {
+        StartFault::Fails => {}
+        StartFault::ThenPatchesFail => state.rivals.patch_blocked = Some(id.to_owned()),
+        StartFault::AfterRivalClaim => {
+            instance["name"] = json!("crabbox-me--rival");
+            instance["metadata"]["crabbox_lease_id"] = json!("cbx_rival");
+            instance["metadata"]["crabbox_role"] = json!("lease");
+        }
+    }
+    Some((
+        500,
+        nested_error("start_failed", "Instance failed to start."),
+    ))
 }
 
 /// Progress of two acquires the fake makes race for one seed.
@@ -208,6 +247,12 @@ impl FakeAgent37 {
     #[allow(dead_code, reason = "each test binary uses a different subset")]
     pub(crate) fn start_race(&self) {
         self.lock().rivals.race = Some(Race::default());
+    }
+
+    /// Makes the next `start` fail as `fault` says.
+    #[allow(dead_code, reason = "each test binary uses a different subset")]
+    pub(crate) fn fail_next_start(&self, fault: StartFault) {
+        self.lock().rivals.start_fault = Some(fault);
     }
 
     /// Makes a rival claim and start seed `id` right after the next list is answered.

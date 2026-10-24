@@ -18,6 +18,8 @@ use serde_json::{json, Value};
 
 #[path = "fake_cache.rs"]
 mod cache;
+#[allow(unused_imports, reason = "each test binary uses a different subset")]
+pub(crate) use cache::StartFault;
 #[path = "fake_scripts.rs"]
 mod scripts;
 #[allow(unused_imports, reason = "each test binary uses a different subset")]
@@ -453,7 +455,7 @@ fn route(request: &RecordedRequest, state: &Mutex<State>) -> (u16, Value) {
             let id = path
                 .trim_start_matches("/v1/instances/")
                 .trim_end_matches("/start");
-            set_power(&mut state, id, true)
+            cache::start(&mut state, id).unwrap_or_else(|| set_power(&mut state, id, true))
         }
         ("PATCH", _) if path.starts_with("/v1/instances/") => cache::patch(
             &mut state,
