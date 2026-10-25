@@ -130,7 +130,8 @@ fn plan_skips_bad_and_duplicate_entries() {
 fn seed_key_covers_scope_owner_shape_template_and_region() {
     const A: &str = "0123456789abcdef";
     let base = seed_key(A, "me", &shape(2, None));
-    assert_eq!(base.len(), 16);
+    assert_eq!(base.len(), 16 + 1 + 16, "scope, dash, hash");
+    assert_eq!(super::meta::scope_of(&base), A, "the scope stays readable");
     assert_eq!(base, seed_key(A, "me", &shape(2, None)));
     assert_ne!(base, seed_key("fedcba9876543210", "me", &shape(2, None)));
     assert_ne!(base, seed_key(A, "you", &shape(2, None)));

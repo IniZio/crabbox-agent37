@@ -36,15 +36,15 @@ fn locate(
         ApiError::Http { status: 404, .. } => format!("instance {cloud_id} not found"),
         other => other.operator_message(),
     })?;
+    if crate::cache::is_seed(&instance) {
+        return Err(format!("instance {cloud_id} not found"));
+    }
     if !instance
         .name
         .as_deref()
         .is_some_and(|n| n.starts_with(&prefix(owner)))
     {
         return Err(format!("instance {cloud_id} belongs to another owner"));
-    }
-    if crate::cache::is_seed(&instance) {
-        return Err(format!("instance {cloud_id} not found"));
     }
     if let Some(name) = derived {
         let found = find_by_name(api, &name, diag)?.map(|i| i.id);

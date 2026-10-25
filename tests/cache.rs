@@ -53,7 +53,7 @@ fn release_keeps_a_stopped_seed_that_the_next_acquire_restores() {
     assert_eq!(release(&fake, &first), 0);
     let seed = instance(&fake, &first["cloudId"]);
     assert_eq!(seed["status"], "stopped");
-    assert_eq!(seed["metadata"]["crabbox_role"], "seed");
+    assert_eq!(seed["metadata"]["crabbox_state"], "seed");
     let list = run(&json!({"protocolVersion": 1, "operation": "list",
                            "config": config(&fake, &json!({}))}));
     assert_eq!(list.1["leases"], json!([]), "list hides seeds");
@@ -83,24 +83,6 @@ fn assert_restored(fake: &FakeAgent37, lease: &Value, root: &Path) {
         resolved.0, 0,
         "the reused Box resolves as the new lease: {}",
         resolved.1
-    );
-}
-
-#[test]
-fn a_newer_seed_replaces_older_seeds_of_its_key() {
-    let fake = FakeAgent37::start_with_key(KEY);
-    let a = acquire(&fake, 1, "standard");
-    let b = acquire(&fake, 2, "standard");
-    assert_eq!(release(&fake, &a), 0);
-    assert_eq!(release(&fake, &b), 0);
-    assert_eq!(
-        instance(&fake, &a["cloudId"]),
-        Value::Null,
-        "older seed deleted"
-    );
-    assert_eq!(
-        instance(&fake, &b["cloudId"])["metadata"]["crabbox_role"],
-        "seed"
     );
 }
 
@@ -192,13 +174,13 @@ fn cleanup_deletes_expired_and_surplus_seeds_only() {
         let gen = gen.to_string();
         fake.add_instance_with_metadata(
             id,
-            &format!("crabbox-me--seed.{gen}"),
+            &format!("crabbox-seed-k-{gen}"),
             "vm",
             "stopped",
             &[
                 ("crabbox_owner", "me"),
-                ("crabbox_role", "seed"),
-                ("crabbox_cache_key", "k"),
+                ("crabbox_state", "seed"),
+                ("crabbox_cache_key", &format!("k{id}")),
                 ("crabbox_seed_gen", &gen),
             ],
         );
@@ -283,7 +265,7 @@ fn without_the_host_claim_lock_acquire_goes_cold() {
     assert_ne!(second["cloudId"], first["cloudId"]);
     assert_eq!(outcomes(&second), all("empty"));
     assert_eq!(
-        instance(&fake, &first["cloudId"])["metadata"]["crabbox_role"],
+        instance(&fake, &first["cloudId"])["metadata"]["crabbox_state"],
         "seed"
     );
 }
@@ -303,7 +285,7 @@ fn another_owners_seed_of_the_same_key_is_never_claimed() {
 }
 
 #[test]
-fn a_release_deletes_older_seeds_of_its_key_only() {
+fn a_release_keeps_the_seed_of_another_key() {
     let fake = FakeAgent37::start_with_key(KEY);
     let fast = acquire(&fake, 1, "fast");
     let standard = acquire(&fake, 2, "standard");
@@ -311,7 +293,7 @@ fn a_release_deletes_older_seeds_of_its_key_only() {
     assert_eq!(release(&fake, &standard), 0);
     for lease in [&fast, &standard] {
         assert_eq!(
-            instance(&fake, &lease["cloudId"])["metadata"]["crabbox_role"],
+            instance(&fake, &lease["cloudId"])["metadata"]["crabbox_state"],
             "seed",
             "each key keeps its seed"
         );
@@ -329,12 +311,12 @@ fn cleanup_spares_a_seed_claimed_after_it_listed() {
         .to_string();
     fake.add_instance_with_metadata(
         "s1",
-        &format!("crabbox-me--seed.{old}"),
+        &format!("crabbox-seed-k-{old}"),
         "vm",
         "stopped",
         &[
             ("crabbox_owner", "me"),
-            ("crabbox_role", "seed"),
+            ("crabbox_state", "seed"),
             ("crabbox_cache_key", "k"),
             ("crabbox_seed_gen", &old),
         ],
@@ -415,9 +397,9 @@ fn a_seed_whose_start_fails_before_its_claim_returns_to_the_seeds() {
     let fake = FakeAgent37::start_with_key(KEY);
     let (seed, _) = seed_start_fails(&fake, StartFault::Fails);
     let now = instance(&fake, &seed);
-    assert_eq!(now["metadata"]["crabbox_role"], "seed");
+    assert_eq!(now["metadata"]["crabbox_state"], "seed");
     let gen = now["metadata"]["crabbox_seed_gen"].as_str().unwrap();
-    assert_eq!(now["name"], format!("crabbox-me--seed.{gen}"));
+    assert_eq!(now["name"], format!("crabbox-seed-01234567-{gen}"));
 }
 
 #[test]

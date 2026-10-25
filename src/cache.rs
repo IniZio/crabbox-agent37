@@ -6,6 +6,8 @@
 //! survive a stop and start.
 
 mod gc;
+mod list;
+mod meta;
 mod script;
 mod seed;
 
@@ -15,8 +17,10 @@ use ring::digest;
 
 use crate::protocol::{CacheVolumeEcho, CacheVolumeRequest};
 
-pub(crate) use gc::{delete_seeds, gc};
-pub(crate) use seed::{claim, is_lease, is_seed, release, setup, take, Taken};
+pub(crate) use gc::{delete_seeds, delete_stranded, gc};
+pub(crate) use list::seeds;
+pub(crate) use meta::{is_lease, is_seed, lease_marks, seed_gen, seed_of};
+pub(crate) use seed::{claim, release, setup, take, Taken};
 
 /// The login user's home; `~/` paths resolve here.
 const HOME: &str = "/root";
@@ -220,8 +224,9 @@ pub(crate) fn scope<'a>(sent: Option<&'a str>, diag: &mut dyn std::io::Write) ->
     valid.then_some(sent)
 }
 
-/// Seed key, as 16 hex: the cache scope, owner, template, VM shape and region. A seed holds
-/// the whole Box, so only a Box of the same scope may reuse it; groups are not part of it.
+/// Seed key, `<scope>-<16 hex>`: the cache scope, then a hash of the scope, owner, template,
+/// VM shape and region. A seed holds the whole Box, so only a Box of the same scope may reuse
+/// it; groups are not part of it. The scope stays readable so a seed can be listed by it.
 pub(crate) fn seed_key(scope: &str, owner: &str, shape: &Shape<'_>) -> String {
     let text = format!(
         "{scope}\n{owner}\n{}\n{}x{}x{}\n{}",
@@ -231,7 +236,7 @@ pub(crate) fn seed_key(scope: &str, owner: &str, shape: &Shape<'_>) -> String {
         shape.disk_gb,
         shape.region
     );
-    sha256_hex(&text, 8)
+    format!("{scope}-{}", sha256_hex(&text, 8))
 }
 
 /// A request entry as a typed volume, or why it is refused.

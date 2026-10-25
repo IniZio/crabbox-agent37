@@ -56,9 +56,9 @@ fn a_claim_patch_that_landed_but_failed_returns_the_seed() {
     assert_ne!(second["cloudId"], seed);
     let now = instance(&fake, &seed);
     assert_eq!(now["status"], "stopped");
-    assert_eq!(now["metadata"]["crabbox_role"], "seed");
+    assert_eq!(now["metadata"]["crabbox_state"], "seed");
     let gen = now["metadata"]["crabbox_seed_gen"].as_str().unwrap();
-    assert_eq!(now["name"], format!("crabbox-me--seed.{gen}"));
+    assert_eq!(now["name"], format!("crabbox-seed-01234567-{gen}"));
 }
 
 #[test]

@@ -4,7 +4,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 mod cache;
-pub use cache::{CacheVolumeEcho, CacheVolumeRequest};
+pub use cache::{seeds_response, CacheVolumeEcho, CacheVolumeRequest, SeedRow};
 
 /// The only protocol version this adapter speaks.
 const VERSION: u64 = 1;
@@ -30,6 +30,8 @@ pub enum Operation {
     Pause,
     /// Start a paused lease's machine.
     Resume,
+    /// List the cache seeds; read-only, and never sent by crabbox.
+    Seeds,
 }
 
 impl Operation {
@@ -46,6 +48,7 @@ impl Operation {
             Self::Cleanup => "cleanup",
             Self::Pause => "pause",
             Self::Resume => "resume",
+            Self::Seeds => "seeds",
         }
     }
 
@@ -61,6 +64,7 @@ impl Operation {
             Self::Cleanup,
             Self::Pause,
             Self::Resume,
+            Self::Seeds,
         ]
         .into_iter()
         .find(|op| op.as_str() == name)

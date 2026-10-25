@@ -330,7 +330,7 @@ fn list_and_resolve_use_the_running_lease_box_of_two_with_one_name() {
             status,
             &[
                 ("crabbox_owner", "alice"),
-                ("crabbox_role", role),
+                ("crabbox_state", role),
                 ("crabbox_lease_id", "cbx_000000000001"),
                 ("crabbox_slug", "slug-1"),
             ],

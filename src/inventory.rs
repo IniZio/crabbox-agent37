@@ -8,7 +8,7 @@ use std::io::Write;
 
 use crate::agent37::{Agent37, ApiError, Instance};
 use crate::lease::{pick, prefix, settings};
-use crate::protocol::{LeaseRow, Request};
+use crate::protocol::{LeaseRow, Request, SeedRow};
 
 /// True only when both the name prefix and the owner metadata match.
 #[must_use]
@@ -129,7 +129,7 @@ pub(crate) fn lease_instance(
     if instance.id != id {
         return Err(format!("instance {id} resolved to {}", instance.id));
     }
-    if owned(&instance, owner) && crate::cache::is_seed(&instance) {
+    if crate::cache::seed_of(&instance, owner) {
         return Ok(None);
     }
     if !owned(&instance, owner) {
@@ -165,17 +165,21 @@ pub fn release(request: &Request, api: &dyn Agent37) -> Result<(), String> {
     let s = settings(&request.config)?;
     match lease_instance(request, api, &s.owner, "release")? {
         Some(instance) => {
-            tolerate_missing(crate::cache::release(api, &s.owner, &instance, s.timeout))
+            let owner = (s.owner.as_str(), &request.config);
+            tolerate_missing(crate::cache::release(api, owner, &instance, s.timeout))
         }
         None => Ok(()),
     }
 }
 
-/// Deletes owned instances `list` cannot report, and expired or surplus seeds.
+/// Deletes owned instances `list` cannot report, surplus and expired seeds, and stranded
+/// leases.
 ///
 /// crabbox can never release an instance with no lease id, slug or name; an interrupted
-/// acquire or manual create leaves them. A seed past `cache.ttlDays` or beyond the newest
-/// `cache.maxSeeds` goes too, if a fresh read still shows it a stopped seed.
+/// acquire or manual create leaves them. The cache sweep adds seeds beyond
+/// `cache.seedsPerKey` of a key, past `cache.ttlDays` or beyond `cache.maxSeeds`, and leases
+/// the adapter last wrote over `cache.maxLeaseHours` ago, each only if a fresh read still
+/// shows it so.
 ///
 /// # Errors
 /// Returns the operator message when config or an API call fails.
@@ -187,21 +191,24 @@ pub fn cleanup(request: &Request, api: &dyn Agent37) -> Result<String, String> {
         .filter(|i| unlistable(i, &owner))
         .map(|i| i.id.clone())
         .collect();
-    let seeds: Vec<String> = crate::cache::gc(&instances, &owner, &request.config)?
-        .into_iter()
-        .map(str::to_owned)
-        .collect();
-    if ids.is_empty() && seeds.is_empty() {
+    let sweep = crate::cache::gc(&instances, &owner, &request.config)?;
+    let owned_ids =
+        |list: &[&str]| -> Vec<String> { list.iter().map(|s| (*s).to_owned()).collect() };
+    let (seeds, leases) = (owned_ids(&sweep.seeds), owned_ids(&sweep.leases));
+    if ids.is_empty() && seeds.is_empty() && leases.is_empty() {
         return Ok("nothing to clean up".to_owned());
     }
     let verb = if request.dry_run {
         ids.extend(seeds);
+        ids.extend(leases);
         "would delete"
     } else {
         for id in &ids {
             tolerate_missing(api.delete_instance(id))?;
         }
-        ids.extend(crate::cache::delete_seeds(api, &owner, &seeds, None));
+        ids.extend(crate::cache::delete_seeds(api, &owner, &seeds));
+        let cutoff = sweep.lease_cutoff;
+        ids.extend(crate::cache::delete_stranded(api, &owner, &leases, cutoff));
         "deleted"
     };
     ids.sort_unstable();
@@ -210,6 +217,16 @@ pub fn cleanup(request: &Request, api: &dyn Agent37) -> Result<String, String> {
         ids.len(),
         ids.join(", ")
     ))
+}
+
+/// Lists this owner's cache seeds, newest first, without changing anything.
+///
+/// # Errors
+/// Returns the operator message when config or the API call fails.
+pub fn seeds(request: &Request, api: &dyn Agent37) -> Result<Vec<SeedRow>, String> {
+    let owner = settings(&request.config)?.owner;
+    let instances = api.list_instances().map_err(|e| e.operator_message())?;
+    Ok(crate::cache::seeds(&instances, &owner))
 }
 
 #[cfg(test)]

@@ -179,6 +179,16 @@ struct WireInstance {
     /// Metadata set at create; absent or `null` on instances created elsewhere.
     #[serde(default)]
     metadata: Option<BTreeMap<String, Value>>,
+    /// Resources the instance was created with.
+    #[serde(default)]
+    resources: Option<WireResources>,
+}
+
+/// The part of an instance's resources the adapter reports.
+#[derive(Deserialize)]
+struct WireResources {
+    /// Disk size in GB.
+    disk: Option<u32>,
 }
 
 impl From<WireInstance> for Instance {
@@ -188,6 +198,7 @@ impl From<WireInstance> for Instance {
             name: w.name,
             kind: w.kind,
             status: w.status,
+            disk_gb: w.resources.and_then(|r| r.disk),
             metadata: w
                 .metadata
                 .unwrap_or_default()

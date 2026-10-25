@@ -149,7 +149,10 @@ fn create(
             ("crabbox_owner".to_owned(), settings.owner.clone()),
             ("crabbox_lease_id".to_owned(), desired.lease_id.clone()),
             ("crabbox_slug".to_owned(), desired.slug.clone()),
-        ],
+        ]
+        .into_iter()
+        .chain(crate::cache::lease_marks())
+        .collect(),
     };
     let created = match api.create_instance(&spec) {
         Ok(created) => created,
@@ -166,7 +169,7 @@ fn create(
     };
     let _ = writeln!(
         diag,
-        "acquire: created {} with a {disk_gb} GB disk",
+        "acquire: cold; created {} with a {disk_gb} GB disk",
         created.id
     );
     Ok(created)
@@ -303,8 +306,9 @@ pub(crate) fn build_lease(
 
 /// Finds or creates the VM for `request.desired` and waits until it is reachable.
 ///
-/// With cache volumes, a cache scope and no VM yet, the newest seed of the key is claimed
-/// first.
+/// With cache volumes, a cache scope and no VM yet, the newest free seed of the key is
+/// claimed first, and the next when another acquire wins it. The log says `restored from seed
+/// gen <g>` or `cold`.
 pub fn acquire(
     request: &Request,
     api: &dyn Agent37,
@@ -338,15 +342,12 @@ pub fn acquire(
         desired,
     };
     let existing = find_by_name(api, &name, diag)?;
-    if let (None, Some(key)) = (&existing, cache.key.as_deref()) {
-        let pair = (&cache.plan, key);
-        if let Some(seed) = crate::cache::claim(api, &s.owner, desired, &name, pair, diag) {
-            if let Some((key, echo)) = from_seed(api, &seed, (&cache, &name), s.timeout, diag) {
-                return with_echo(
-                    build_lease(desired.clone(), &seed.id, "ready", Some(key), proxy),
-                    echo,
-                );
-            }
+    if existing.is_none() {
+        if let Some((id, key, echo)) = restore(api, (&cache, &name), s.timeout, diag) {
+            return with_echo(
+                build_lease(desired.clone(), &id, "ready", Some(key), proxy),
+                echo,
+            );
         }
     }
     let (instance, created) = match existing {
@@ -368,5 +369,5 @@ pub fn acquire(
 
 mod ready;
 mod resolve;
-use ready::{from_seed, ready, with_echo, CacheCtx};
+use ready::{ready, restore, with_echo, CacheCtx};
 pub use resolve::resolve;

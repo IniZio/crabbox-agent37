@@ -59,28 +59,36 @@ pub(super) fn ready(
     Ok((fetch_host_key(api, id, deadline)?, echo))
 }
 
-/// Starts, claims and readies a claimed seed; `None` means create cold. It deletes the seed
-/// only when this lease won the claim inside the Box and the seed then failed.
-pub(super) fn from_seed(
+/// What readying a claimed seed came to.
+enum Seeded {
+    /// The seed is this lease's Box: its host key and the cache echo.
+    Ready(String, Vec<CacheVolumeEcho>),
+    /// Another acquire won it inside the Box; the next seed may still be free.
+    Lost,
+    /// It failed; the lease goes cold.
+    Failed,
+}
+
+/// Starts, claims and readies a claimed seed. It deletes the seed only when this lease won
+/// the claim inside the Box and the seed then failed.
+fn from_seed(
     api: &dyn Agent37,
     seed: &Instance,
     (cache, name): (&CacheCtx<'_>, &str),
     timeout: u64,
     diag: &mut dyn Write,
-) -> Option<(String, Vec<CacheVolumeEcho>)> {
-    let key = cache.key.as_deref()?;
+) -> Seeded {
+    let Some(key) = cache.key.as_deref() else {
+        return Seeded::Failed;
+    };
     let deadline = Instant::now() + Duration::from_secs(timeout);
     let lease = (cache.owner, cache.desired, name);
     let taken = crate::cache::take(api, seed, lease, (&cache.plan, key), deadline);
     let result = match taken {
         Ok(Taken::Ours(now)) => ready(api, &now, (true, true), cache, deadline, diag),
         Ok(Taken::Lost) => {
-            let _ = writeln!(
-                diag,
-                "acquire: lost seed {} inside the Box; creating cold",
-                seed.id
-            );
-            return None;
+            let _ = writeln!(diag, "acquire: lost seed {} inside the Box", seed.id);
+            return Seeded::Lost;
         }
         Ok(Taken::Failed(err)) => {
             let _ = writeln!(
@@ -88,12 +96,12 @@ pub(super) fn from_seed(
                 "acquire: seed {} failed ({err}); creating cold",
                 seed.id
             );
-            return None;
+            return Seeded::Failed;
         }
         Err(err) => Err(err),
     };
     match result {
-        Ok(done) => Some(done),
+        Ok((host_key, echo)) => Seeded::Ready(host_key, echo),
         Err(err) => {
             let _ = writeln!(
                 diag,
@@ -101,9 +109,34 @@ pub(super) fn from_seed(
                 seed.id
             );
             let _ = api.delete_instance(&seed.id);
-            None
+            Seeded::Failed
         }
     }
+}
+
+/// Claims the seeds of the cache key newest first until one becomes this lease's Box, and
+/// readies it; returns its id, host key and cache echo. `None` means create cold: no key, no
+/// free seed, or a seed that failed. Another acquire winning a seed passes to the next one.
+pub(super) fn restore(
+    api: &dyn Agent37,
+    (cache, name): (&CacheCtx<'_>, &str),
+    timeout: u64,
+    diag: &mut dyn Write,
+) -> Option<(String, String, Vec<CacheVolumeEcho>)> {
+    let key = cache.key.as_deref()?;
+    let pair = (&cache.plan, key);
+    while let Some(seed) = crate::cache::claim(api, cache.owner, cache.desired, name, pair, diag) {
+        match from_seed(api, &seed, (cache, name), timeout, diag) {
+            Seeded::Ready(host_key, echo) => {
+                let gen = crate::cache::seed_gen(&seed).unwrap_or("0");
+                let _ = writeln!(diag, "acquire: restored from seed gen {gen}");
+                return Some((seed.id, host_key, echo));
+            }
+            Seeded::Lost => {}
+            Seeded::Failed => break,
+        }
+    }
+    None
 }
 
 /// `lease` carrying the cache echo.
