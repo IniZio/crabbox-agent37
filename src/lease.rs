@@ -16,7 +16,7 @@ use crate::protocol::{Desired, Lease, Request, Ssh};
 pub(crate) use crate::settings::{disk_for, label_ok, settings, Settings};
 
 /// Remote check that the tools crabbox needs are installed.
-const READY_CHECK: &str = "command -v bash >/dev/null && command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null";
+const READY_CHECK: &str = "command -v bash >/dev/null && command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null && command -v tmux >/dev/null";
 /// Pause between status and exec polls.
 const POLL: Duration = Duration::from_secs(1);
 
