@@ -124,13 +124,7 @@ fn add_box(
     if let Some(c) = &claimed {
         meta.push(("crabbox_claimed_at", c));
     }
-    fake.add_instance_with_metadata(
-        id,
-        &format!("crabbox-{owner}--{id}"),
-        "vm",
-        status,
-        &meta,
-    );
+    fake.add_instance_with_metadata(id, &format!("crabbox-{owner}--{id}"), "vm", status, &meta);
 }
 
 #[test]
@@ -335,7 +329,11 @@ fn cleanup_keeps_the_newest_max_seeds_per_owner() {
 fn cleanup_never_sweeps_a_lease_by_age() {
     let fake = FakeAgent37::start_with_key(KEY);
     add_lease(&fake, ("month-old", "me", "lease"), Some(30 * 86_400));
-    add_box(&fake, ("asleep", "me", "lease", "stopped"), Some(30 * 86_400));
+    add_box(
+        &fake,
+        ("asleep", "me", "lease", "stopped"),
+        Some(30 * 86_400),
+    );
     let (code, out) = operate(&fake, "cleanup", &json!({}));
     assert_eq!(code, 0, "{out}");
     assert_eq!(ids(&fake), ["asleep", "month-old"], "{out}");
@@ -358,10 +356,13 @@ fn a_long_ready_timeout_lengthens_the_claim_bound() {
     let fake = FakeAgent37::start_with_key(KEY);
     add_lease(&fake, ("slow", "me", "claiming"), Some(2 * 3600));
     let config = config(&fake, &json!({ "readyTimeoutSeconds": 3 * 3600 }));
-    let (code, out) =
-        run(&json!({"protocolVersion": 1, "operation": "cleanup", "config": config}));
+    let (code, out) = run(&json!({"protocolVersion": 1, "operation": "cleanup", "config": config}));
     assert_eq!(code, 0, "{out}");
-    assert_eq!(ids(&fake), ["slow"], "a claim may still be starting it: {out}");
+    assert_eq!(
+        ids(&fake),
+        ["slow"],
+        "a claim may still be starting it: {out}"
+    );
 }
 
 #[test]
@@ -377,15 +378,21 @@ fn cleanup_spares_a_stale_claim_given_back_after_it_listed() {
 /// Adds a stopped seed of `owner` as the previous release named and marked it: a lease name,
 /// `crabbox_role=seed`, no `crabbox_state`, and the lease id and slug its lease left behind.
 fn add_old_seed(fake: &FakeAgent37, (id, owner): (&str, &str)) {
+    add_old_format(fake, (id, owner, owner), "seed");
+}
+
+/// Adds a stopped old-format Box named for `named`, whose `crabbox_owner` metadata is `owner`
+/// and whose `crabbox_role` is `role`.
+fn add_old_format(fake: &FakeAgent37, (id, named, owner): (&str, &str, &str), role: &str) {
     let gen = (now() - 3600).to_string();
     fake.add_instance_with_metadata(
         id,
-        &format!("crabbox-{owner}--seed.{gen}"),
+        &format!("crabbox-{named}--seed.{gen}"),
         "vm",
         "stopped",
         &[
             ("crabbox_owner", owner),
-            ("crabbox_role", "seed"),
+            ("crabbox_role", role),
             ("crabbox_cache_key", "k"),
             ("crabbox_seed_gen", &gen),
             ("crabbox_seed_since", &gen),
@@ -413,6 +420,26 @@ fn old_format_seeds_stay_out_of_list_and_cleanup_deletes_only_this_owners() {
     let (code, out) = operate(&fake, "cleanup", &json!({}));
     assert_eq!(code, 0, "{out}");
     assert_eq!(ids(&fake), ["live", "theirs"], "{out}");
+}
+
+#[test]
+fn cleanup_keeps_an_old_format_lease_named_like_a_seed() {
+    let fake = FakeAgent37::start_with_key(KEY);
+    add_old_format(&fake, ("lease", "me", "me"), "lease");
+    add_old_seed(&fake, ("old", "me"));
+    let (code, out) = operate(&fake, "cleanup", &json!({}));
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(ids(&fake), ["lease"], "{out}");
+}
+
+#[test]
+fn cleanup_keeps_an_old_format_seed_whose_metadata_names_another_owner() {
+    let fake = FakeAgent37::start_with_key(KEY);
+    add_old_format(&fake, ("theirs", "me", "you"), "seed");
+    add_old_seed(&fake, ("old", "me"));
+    let (code, out) = operate(&fake, "cleanup", &json!({}));
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(ids(&fake), ["theirs"], "{out}");
 }
 
 #[test]
