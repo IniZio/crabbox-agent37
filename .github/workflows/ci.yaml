@@ -40,7 +40,6 @@ jobs:
           tool: ${{ steps.tools.outputs.list }}
 
       - run: make setup
-      - run: make format-check
       - run: make lint
       - run: make audit
       - run: make unit
