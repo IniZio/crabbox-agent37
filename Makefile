@@ -5,10 +5,10 @@ TAPLO_VERSION := 0.10.0
 TYPOS_VERSION := 1.51.1
 LLVM_COV_VERSION := 0.9.1
 
-.PHONY: help coverage setup secret audit lint format format-check fmt-check test unit ci build deploy
+.PHONY: help coverage setup secret audit lint format test unit ci build deploy
 
 help:
-	@echo "targets: setup secret audit lint format format-check test ci build deploy"
+	@echo "targets: setup secret audit lint format test ci build deploy"
 
 setup:
 	@rustup show active-toolchain >/dev/null
@@ -27,6 +27,8 @@ audit:
 	cargo machete
 
 lint:
+	cargo fmt --all --check
+	taplo fmt --check
 	cargo clippy --all-targets --locked -- -D warnings
 	tools/file-cap.sh
 	typos
@@ -36,12 +38,6 @@ lint:
 format:
 	cargo fmt --all
 	taplo fmt
-
-format-check:
-	cargo fmt --all --check
-	taplo fmt --check
-
-fmt-check: format-check
 
 unit:
 	cargo nextest run --all-targets --locked
@@ -55,7 +51,6 @@ coverage:
 ci:
 	$(MAKE) audit
 	$(MAKE) lint
-	$(MAKE) format-check
 	$(MAKE) test
 
 build:
