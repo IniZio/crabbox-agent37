@@ -74,13 +74,9 @@ pub(crate) fn delete_seeds(api: &dyn Agent37, owner: &str, ids: &[String]) -> Ve
     };
     ids.iter()
         .filter(|id| {
-            api.get_instance(id)
-                .is_ok_and(|now| {
-                    stopped_seed(&now, owner, None)
-                        || stuck_seed(&now, owner)
-                        || old_seed(&now, owner)
-                })
-                && api.delete_instance(id).is_ok()
+            api.get_instance(id).is_ok_and(|now| {
+                stopped_seed(&now, owner, None) || stuck_seed(&now, owner) || old_seed(&now, owner)
+            }) && api.delete_instance(id).is_ok()
         })
         .cloned()
         .collect()
