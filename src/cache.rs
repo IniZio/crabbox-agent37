@@ -19,7 +19,7 @@ use crate::protocol::{CacheVolumeEcho, CacheVolumeRequest};
 
 pub(crate) use gc::{delete_seeds, delete_stranded, gc};
 pub(crate) use list::seeds;
-pub(crate) use meta::{is_lease, is_seed, lease_marks, seed_gen, seed_of};
+pub(crate) use meta::{is_lease, is_seed, lease_marks, old_seed, seed_gen, seed_of};
 pub(crate) use seed::{claim, release, setup, take, Taken};
 
 /// The login user's home; `~/` paths resolve here.

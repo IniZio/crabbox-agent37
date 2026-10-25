@@ -25,6 +25,7 @@ fn row(instance: &Instance, owner: &str) -> Option<LeaseRow> {
     if !owned(instance, owner)
         || instance.kind.as_deref() != Some("vm")
         || crate::cache::is_seed(instance)
+        || crate::cache::old_seed(instance, owner)
     {
         return None;
     }
@@ -172,14 +173,14 @@ pub fn release(request: &Request, api: &dyn Agent37) -> Result<(), String> {
     }
 }
 
-/// Deletes owned instances `list` cannot report, surplus and expired seeds, and stranded
-/// leases.
+/// Deletes owned instances `list` cannot report, surplus, expired and old-format seeds, and
+/// stranded claims.
 ///
 /// crabbox can never release an instance with no lease id, slug or name; an interrupted
 /// acquire or manual create leaves them. The cache sweep adds seeds beyond
-/// `cache.seedsPerKey` of a key, past `cache.ttlDays` or beyond `cache.maxSeeds`, and leases
-/// the adapter last wrote over `cache.maxLeaseHours` ago, each only if a fresh read still
-/// shows it so.
+/// `cache.seedsPerKey` of a key, past `cache.ttlDays` or beyond `cache.maxSeeds`, seeds in the
+/// previous release's format, and Boxes a failed claim left `claiming`, each only if a fresh
+/// read still shows it so. A lease is never deleted for its age.
 ///
 /// # Errors
 /// Returns the operator message when config or an API call fails.
@@ -194,21 +195,21 @@ pub fn cleanup(request: &Request, api: &dyn Agent37) -> Result<String, String> {
     let sweep = crate::cache::gc(&instances, &owner, &request.config)?;
     let owned_ids =
         |list: &[&str]| -> Vec<String> { list.iter().map(|s| (*s).to_owned()).collect() };
-    let (seeds, leases) = (owned_ids(&sweep.seeds), owned_ids(&sweep.leases));
-    if ids.is_empty() && seeds.is_empty() && leases.is_empty() {
+    let (seeds, claims) = (owned_ids(&sweep.seeds), owned_ids(&sweep.claims));
+    if ids.is_empty() && seeds.is_empty() && claims.is_empty() {
         return Ok("nothing to clean up".to_owned());
     }
     let verb = if request.dry_run {
         ids.extend(seeds);
-        ids.extend(leases);
+        ids.extend(claims);
         "would delete"
     } else {
         for id in &ids {
             tolerate_missing(api.delete_instance(id))?;
         }
         ids.extend(crate::cache::delete_seeds(api, &owner, &seeds));
-        let cutoff = sweep.lease_cutoff;
-        ids.extend(crate::cache::delete_stranded(api, &owner, &leases, cutoff));
+        let cutoff = sweep.claim_cutoff;
+        ids.extend(crate::cache::delete_stranded(api, &owner, &claims, cutoff));
         "deleted"
     };
     ids.sort_unstable();
