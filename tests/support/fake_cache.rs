@@ -97,7 +97,7 @@ pub(super) fn patch(state: &mut State, id: &str, body: &str) -> (u16, Value) {
     let Some(instance) = state.instances.iter_mut().find(|i| i["id"] == id) else {
         return (404, nested_error("not_found", "Instance not found."));
     };
-    let was_seed = instance["metadata"]["crabbox_role"] == "seed";
+    let was_seed = instance["metadata"]["crabbox_state"] == "seed";
     if let Some(name) = parsed.get("name") {
         instance["name"] = name.clone();
     }
@@ -134,12 +134,22 @@ fn rival_claim(state: &mut State, id: &str) {
     if let Some(i) = state.instances.iter_mut().find(|i| i["id"] == id) {
         i["name"] = json!("crabbox-me--rival");
         i["metadata"]["crabbox_lease_id"] = json!("cbx_rival");
-        i["metadata"]["crabbox_role"] = json!("lease");
+        i["metadata"]["crabbox_state"] = json!("lease");
         i["status"] = json!("running");
     }
 }
 
 impl FakeAgent37 {
+    /// Sets string metadata `key` of instance `id`, as a rival writer would.
+    #[allow(dead_code, reason = "each test binary uses a different subset")]
+    pub(crate) fn set_metadata(&self, id: &str, key: &str, value: &str) {
+        self.lock()
+            .instances
+            .iter_mut()
+            .find(|i| i["id"] == id)
+            .unwrap()["metadata"][key] = json!(value);
+    }
+
     /// Scratch root standing in for instance `id`'s filesystem.
     #[allow(dead_code, reason = "each test binary uses a different subset")]
     pub(crate) fn box_root(&self, id: &str) -> PathBuf {
@@ -164,6 +174,8 @@ pub(super) struct Rivals {
     race: Option<Race>,
     /// Seed a rival claims and starts right after the given count of further lists.
     taken_after_list: Option<(String, u32)>,
+    /// Lease a rival releases into a seed right after the next list.
+    released_after_list: Option<String>,
     /// How the next `start` fails, when armed.
     start_fault: Option<StartFault>,
     /// Instance whose `PATCH`es fail.
@@ -239,7 +251,7 @@ pub(super) fn start(state: &mut State, id: &str) -> Option<(u16, Value)> {
         StartFault::AfterRivalClaim => {
             instance["name"] = json!("crabbox-me--rival");
             instance["metadata"]["crabbox_lease_id"] = json!("cbx_rival");
-            instance["metadata"]["crabbox_role"] = json!("lease");
+            instance["metadata"]["crabbox_state"] = json!("lease");
         }
     }
     Some((
@@ -313,6 +325,12 @@ pub(super) fn observe(state: &mut State, method: &str, path: &str) {
         }
     }
     if (method, path) == ("GET", "/v1/instances") {
+        if let Some(id) = state.rivals.released_after_list.take() {
+            if let Some(i) = state.instances.iter_mut().find(|i| i["id"] == id.as_str()) {
+                i["metadata"]["crabbox_state"] = json!("seed");
+                i["status"] = json!("stopped");
+            }
+        }
         match state.rivals.taken_after_list.take() {
             Some((id, 1)) => rival_claim(state, &id),
             Some((id, n)) => state.rivals.taken_after_list = Some((id, n - 1)),
@@ -343,6 +361,12 @@ impl FakeAgent37 {
     #[allow(dead_code, reason = "each test binary uses a different subset")]
     pub(crate) fn take_after_list(&self, id: &str, lists: u32) {
         self.lock().rivals.taken_after_list = Some((id.to_owned(), lists));
+    }
+
+    /// Makes a rival release lease `id` into a stopped seed right after the next list.
+    #[allow(dead_code, reason = "each test binary uses a different subset")]
+    pub(crate) fn release_after_list(&self, id: &str) {
+        self.lock().rivals.released_after_list = Some(id.to_owned());
     }
 
     /// Makes the next `PATCH` of `id` land but answer a timeout; with `then_fail`, every later

@@ -100,5 +100,9 @@ fn handle(input: &[u8], env_key: Option<String>, diag: &mut dyn Write) -> Result
         protocol::Operation::Pause => power::pause(&request, &client(&request, env_key)?, diag)
             .map(|m| protocol::message_response(&m)),
         protocol::Operation::Resume => lease_op(&request, env_key, diag, power::resume),
+        protocol::Operation::Seeds => {
+            let rows = inventory::seeds(&request, &client(&request, env_key)?)?;
+            Ok(protocol::seeds_response(&rows))
+        }
     }
 }

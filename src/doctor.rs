@@ -164,6 +164,7 @@ mod tests {
             kind: Some(kind.into()),
             status: None,
             metadata: Vec::new(),
+            disk_gb: None,
         }
     }
 

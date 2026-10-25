@@ -66,6 +66,7 @@ fn inst(id: &str, name: &str, owner: &str, lease: Option<&str>, slug: Option<&st
         kind: Some("vm".into()),
         status: Some("running".into()),
         metadata,
+        disk_gb: None,
     }
 }
 

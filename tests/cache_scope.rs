@@ -33,7 +33,7 @@ fn seeded(fake: &FakeAgent37) -> Value {
     seal_docker(&root);
     assert_eq!(release(fake, &first), 0);
     assert_eq!(
-        instance(fake, &first["cloudId"])["metadata"]["crabbox_role"],
+        instance(fake, &first["cloudId"])["metadata"]["crabbox_state"],
         "seed"
     );
     first
@@ -43,7 +43,7 @@ fn seeded(fake: &FakeAgent37) -> Value {
 fn untouched(fake: &FakeAgent37, first: &Value) {
     let seed = instance(fake, &first["cloudId"]);
     assert_eq!(seed["status"], "stopped");
-    assert_eq!(seed["metadata"]["crabbox_role"], "seed");
+    assert_eq!(seed["metadata"]["crabbox_state"], "seed");
 }
 
 #[test]
@@ -113,7 +113,7 @@ fn a_seed_left_running_by_a_failed_claim_is_stopped() {
     let second = acquire(&fake, 2, "standard");
     assert_ne!(second["cloudId"], first["cloudId"]);
     let now = instance(&fake, &first["cloudId"]);
-    assert_eq!(now["metadata"]["crabbox_role"], "seed");
+    assert_eq!(now["metadata"]["crabbox_state"], "seed");
     assert_eq!(now["status"], "stopped", "the reverted seed is stopped");
 }
 
@@ -138,15 +138,15 @@ fn cleanup_deletes_a_seed_stuck_running_for_over_an_hour() {
         let since = since.to_string();
         fake.add_instance_with_metadata(
             id,
-            &format!("crabbox-me--seed.{since}"),
+            &format!("crabbox-seed-k-{since}"),
             "vm",
             "running",
             &[
                 ("crabbox_owner", "me"),
-                ("crabbox_role", "seed"),
+                ("crabbox_state", "seed"),
                 ("crabbox_cache_key", "k"),
                 ("crabbox_seed_gen", "1"),
-                ("crabbox_seed_since", &since),
+                ("crabbox_released_at", &since),
             ],
         );
     }

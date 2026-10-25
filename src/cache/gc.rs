@@ -1,16 +1,27 @@
-//! Seed garbage collection: expired, surplus and stuck seeds.
+//! The one sweep: surplus, expired and stuck seeds, and stranded leases.
+
+use std::cmp::Reverse;
+use std::collections::BTreeMap;
 
 use serde_json::Value;
 
-use super::seed::{generation, is_seed, lock, now, stopped_seed, GEN, SINCE};
+use super::meta::{generation, now, seed_of, stopped_seed, stranded_lease, GEN, KEY, RELEASED_AT};
+use super::seed::lock;
 use crate::agent37::{Agent37, Instance};
-use crate::inventory::owned;
 use crate::lease::status_of;
 
+/// Stopped seeds kept per seed key when the config sets no `cache.seedsPerKey`.
+const SEEDS_PER_KEY: u64 = 3;
 /// Seed age limit when the config sets no `cache.ttlDays`.
 const TTL_DAYS: u64 = 7;
 /// Seeds kept per owner when the config sets no `cache.maxSeeds`.
 const MAX_SEEDS: u64 = 10;
+/// Hours a lease may go unwritten before it counts as stranded when the config sets no
+/// `cache.maxLeaseHours`. crabbox's lease TTL is 90 minutes, so a lease past a day is not
+/// one crabbox still means to keep.
+const MAX_LEASE_HOURS: u64 = 24;
+/// The shortest `cache.maxLeaseHours`: above crabbox's 90 minute lease TTL.
+const MIN_LEASE_HOURS: u64 = 2;
 /// Seconds a seed may stay not stopped before it counts as stuck.
 const STUCK_SECS: u64 = 3600;
 
@@ -18,72 +29,133 @@ const STUCK_SECS: u64 = 3600;
 /// became a seed. Nothing claims a seed that is not stopped, so it would run forever.
 fn stuck_seed(instance: &Instance, owner: &str) -> bool {
     let since = instance
-        .meta(SINCE)
+        .meta(RELEASED_AT)
         .or_else(|| instance.meta(GEN))
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(0);
-    owned(instance, owner)
-        && is_seed(instance)
-        && instance.kind.as_deref() == Some("vm")
+    seed_of(instance, owner)
         && status_of(instance) != "stopped"
         && since.saturating_add(STUCK_SECS) < now()
 }
 
-/// A non-negative integer under `config.cache.<field>`, else `default`.
-fn limit(config: &Value, field: &str, default: u64) -> Result<u64, String> {
-    match config.get("cache").and_then(|c| c.get(field)) {
-        None | Some(Value::Null) => Ok(default),
-        Some(v) => v
-            .as_u64()
-            .ok_or_else(|| format!("config.cache.{field} must be a whole number")),
-    }
+/// A non-negative integer under `config.cache.<field>`, else `default`, and at least `min`.
+fn limit(config: &Value, field: &str, (default, min): (u64, u64)) -> Result<u64, String> {
+    let Some(v) = config
+        .get("cache")
+        .and_then(|c| c.get(field))
+        .filter(|v| !v.is_null())
+    else {
+        return Ok(default);
+    };
+    v.as_u64()
+        .filter(|n| *n >= min)
+        .ok_or_else(|| format!("config.cache.{field} must be a whole number of at least {min}"))
+}
+
+/// What the sweep would delete.
+#[derive(Debug, Default)]
+pub(crate) struct Sweep<'a> {
+    /// Seeds beyond `cache.seedsPerKey` of their key or `cache.maxSeeds` of the owner, past
+    /// `cache.ttlDays`, or stuck not stopped.
+    pub(crate) seeds: Vec<&'a str>,
+    /// Leases the adapter last wrote over `cache.maxLeaseHours` ago.
+    pub(crate) leases: Vec<&'a str>,
+    /// Unix time before which a lease counts as stranded.
+    pub(crate) lease_cutoff: u64,
 }
 
 /// Deletes each of `ids` that a fresh read under the host claim lock still shows as a
-/// stopped seed of `owner` (and of `key` when given), or a stuck one; returns the ids
-/// deleted. A claim renames a seed before it starts it, so a Box being claimed is never
-/// deleted. Without the lock nothing is deleted.
-pub(crate) fn delete_seeds(
-    api: &dyn Agent37,
-    owner: &str,
-    ids: &[String],
-    key: Option<&str>,
-) -> Vec<String> {
+/// stopped seed of `owner`, or a stuck one; returns the ids deleted. A claim renames a seed
+/// before it starts it, so a Box being claimed is never deleted. Without the lock nothing is
+/// deleted.
+pub(crate) fn delete_seeds(api: &dyn Agent37, owner: &str, ids: &[String]) -> Vec<String> {
     let Some(_guard) = lock(owner) else {
         return Vec::new();
     };
     ids.iter()
         .filter(|id| {
             api.get_instance(id)
-                .is_ok_and(|now| stopped_seed(&now, owner, key) || stuck_seed(&now, owner))
+                .is_ok_and(|now| stopped_seed(&now, owner, None) || stuck_seed(&now, owner))
                 && api.delete_instance(id).is_ok()
         })
         .cloned()
         .collect()
 }
 
-/// Ids of this owner's seeds past `cache.ttlDays`, beyond the newest `cache.maxSeeds`, or
-/// stuck not stopped.
+/// Deletes each of `ids` that a fresh read still shows as a lease of `owner` last written
+/// before `cutoff`, so a lease released into a seed since the list is spared; returns the
+/// ids deleted.
+pub(crate) fn delete_stranded(
+    api: &dyn Agent37,
+    owner: &str,
+    ids: &[String],
+    cutoff: u64,
+) -> Vec<String> {
+    ids.iter()
+        .filter(|id| {
+            api.get_instance(id)
+                .is_ok_and(|now| stranded_lease(&now, owner, cutoff))
+                && api.delete_instance(id).is_ok()
+        })
+        .cloned()
+        .collect()
+}
+
+/// The sweep of `owner`'s instances, per `config.cache`: seeds beyond `seedsPerKey` of a key
+/// (3), older than `ttlDays` (7) or beyond `maxSeeds` of the owner (10), each oldest first,
+/// seeds stuck not stopped, and leases last written over `maxLeaseHours` (24) ago.
 pub(crate) fn gc<'a>(
     instances: &'a [Instance],
     owner: &str,
     config: &Value,
-) -> Result<Vec<&'a str>, String> {
-    let ttl = limit(config, "ttlDays", TTL_DAYS)?.saturating_mul(86_400);
-    let max = usize::try_from(limit(config, "maxSeeds", MAX_SEEDS)?).unwrap_or(usize::MAX);
+) -> Result<Sweep<'a>, String> {
+    let per_key =
+        usize::try_from(limit(config, "seedsPerKey", (SEEDS_PER_KEY, 1))?).unwrap_or(usize::MAX);
+    let ttl = limit(config, "ttlDays", (TTL_DAYS, 0))?.saturating_mul(86_400);
+    let max = usize::try_from(limit(config, "maxSeeds", (MAX_SEEDS, 0))?).unwrap_or(usize::MAX);
+    let lease_age =
+        limit(config, "maxLeaseHours", (MAX_LEASE_HOURS, MIN_LEASE_HOURS))?.saturating_mul(3600);
     let mut seeds: Vec<&Instance> = instances
         .iter()
         .filter(|i| stopped_seed(i, owner, None))
         .collect();
-    seeds.sort_by_key(|i| std::cmp::Reverse((generation(i), i.id.clone())));
+    seeds.sort_by_key(|i| Reverse((generation(i), i.id.clone())));
     let cutoff = now().saturating_sub(ttl);
+    let mut by_key: BTreeMap<&str, Vec<&Instance>> = BTreeMap::new();
+    for seed in &seeds {
+        by_key
+            .entry(seed.meta(KEY).unwrap_or_default())
+            .or_default()
+            .push(seed);
+    }
+    let mut doomed: Vec<&Instance> = by_key
+        .values()
+        .flat_map(|k| k.iter().skip(per_key).copied())
+        .collect();
+    doomed.extend(seeds.iter().filter(|i| generation(i) < cutoff));
+    let kept: Vec<&Instance> = seeds
+        .iter()
+        .filter(|i| !doomed.iter().any(|d| d.id == i.id))
+        .copied()
+        .collect();
+    doomed.extend(kept.iter().skip(max).copied());
     let stuck = instances.iter().filter(|i| stuck_seed(i, owner));
-    Ok(seeds
+    let mut ids: Vec<&str> = doomed
         .into_iter()
-        .enumerate()
-        .filter(|(n, i)| *n >= max || generation(i) < cutoff)
-        .map(|(_, i)| i)
         .chain(stuck)
         .map(|i| i.id.as_str())
-        .collect())
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let lease_cutoff = now().saturating_sub(lease_age);
+    let leases = instances
+        .iter()
+        .filter(|i| stranded_lease(i, owner, lease_cutoff))
+        .map(|i| i.id.as_str())
+        .collect();
+    Ok(Sweep {
+        seeds: ids,
+        leases,
+        lease_cutoff,
+    })
 }

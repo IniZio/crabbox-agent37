@@ -15,6 +15,8 @@ pub struct Instance {
     pub status: Option<String>,
     /// Metadata set at create, string values only, in key order.
     pub metadata: Vec<(String, String)>,
+    /// Disk size in GB, when agent37 reports it.
+    pub disk_gb: Option<u32>,
 }
 
 impl Instance {
@@ -161,6 +163,7 @@ mod tests {
             name: None,
             kind: None,
             status: None,
+            disk_gb: None,
             metadata: metadata
                 .iter()
                 .map(|(k, v)| ((*k).into(), (*v).into()))

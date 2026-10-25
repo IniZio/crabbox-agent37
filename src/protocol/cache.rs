@@ -4,7 +4,7 @@
 use serde::Serialize;
 use serde_json::Value;
 
-use super::opt_str;
+use super::{opt_str, VERSION};
 
 /// One `desired.cacheVolumes` entry, checked for shape only; `cache::plan` validates it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -89,4 +89,38 @@ pub(super) fn parse_cache_volumes(
             })
         })
         .collect()
+}
+
+/// One cache seed reported by the `seeds` listing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeedRow {
+    /// Provider-side instance id.
+    pub cloud_id: String,
+    /// Cache scope the seed was made for.
+    pub scope: String,
+    /// Generation: when the seed was made, in unix seconds.
+    pub gen: u64,
+    /// Seconds since the seed was made.
+    pub age_seconds: u64,
+    /// Disk size in GB, when agent37 reports it.
+    pub disk_gb: Option<u32>,
+    /// Instance status; a seed that is not `stopped` is not claimable.
+    pub status: String,
+}
+
+/// Success response carrying seed rows, newest first.
+#[must_use]
+pub fn seeds_response(rows: &[SeedRow]) -> String {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Envelope<'a> {
+        protocol_version: u64,
+        seeds: &'a [SeedRow],
+    }
+    let envelope = Envelope {
+        protocol_version: VERSION,
+        seeds: rows,
+    };
+    serde_json::to_string(&envelope).unwrap_or_default()
 }
