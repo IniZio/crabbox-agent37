@@ -18,7 +18,7 @@ pub(super) const KEY: &str = "crabbox_cache_key";
 const SEALED: &str = "crabbox_cache_sealed";
 /// A seed's generation (release time, unix seconds); on a lease, the seed it came from.
 pub(super) const GEN: &str = "crabbox_seed_gen";
-/// When the adapter last wrote a lease (unix seconds); a lease far past this is stranded.
+/// When the adapter last wrote a lease (unix seconds); a claim far past this is stranded.
 pub(super) const CLAIMED_AT: &str = "crabbox_claimed_at";
 /// When a Box last became a seed (unix seconds); a seed not stopped long after is stuck.
 pub(super) const RELEASED_AT: &str = "crabbox_released_at";
@@ -89,19 +89,30 @@ pub(super) fn stopped_seed(instance: &Instance, owner: &str, key: Option<&str>) 
         && status_of(instance) == "stopped"
 }
 
-/// True for a lease Box of `owner` that the adapter last wrote before `cutoff`.
-pub(super) fn stranded_lease(instance: &Instance, owner: &str, cutoff: u64) -> bool {
+/// True for a Box of `owner` still `claiming` that a claim wrote before `cutoff`: a claim that
+/// failed and could not give it back. A `lease` is never stranded by age, since a Box may stay
+/// open as long as its user wants.
+pub(super) fn stranded_claim(instance: &Instance, owner: &str, cutoff: u64) -> bool {
     let written = instance
         .meta(CLAIMED_AT)
         .and_then(|t| t.parse::<u64>().ok());
-    is_lease(instance)
-        && instance.meta("crabbox_owner") == Some(owner)
+    state_of(instance) == Some(State::Claiming)
+        && crate::inventory::owned(instance, owner)
+        && instance.kind.as_deref() == Some("vm")
+        && written.is_some_and(|t| t < cutoff)
+}
+
+/// True for a seed the previous release made: `crabbox_role=seed`, no `crabbox_state`, and a
+/// name `crabbox-<owner>--seed.<gen>`. Nothing claims one; the sweep deletes it.
+pub(crate) fn old_seed(instance: &Instance, owner: &str) -> bool {
+    state_of(instance).is_none()
+        && instance.meta("crabbox_role") == Some("seed")
+        && crate::inventory::owned(instance, owner)
+        && instance.kind.as_deref() == Some("vm")
         && instance
             .name
             .as_deref()
-            .is_some_and(|n| n.starts_with(&prefix(owner)))
-        && instance.kind.as_deref() == Some("vm")
-        && written.is_some_and(|t| t < cutoff)
+            .is_some_and(|n| n.starts_with(&format!("{}seed.", prefix(owner))))
 }
 
 /// A seed's generation; unreadable sorts oldest.

@@ -103,8 +103,17 @@ fn add_seed(fake: &FakeAgent37, (id, key): (&str, &str), ago: u64) {
     );
 }
 
-/// Adds a lease Box of `owner` in `state`, claimed `ago` seconds ago when given.
+/// Adds a running lease Box of `owner` in `state`, claimed `ago` seconds ago when given.
 fn add_lease(fake: &FakeAgent37, (id, owner, state): (&str, &str, &str), ago: Option<u64>) {
+    add_box(fake, (id, owner, state, "running"), ago);
+}
+
+/// Adds a lease Box of `owner` in `state` and `status`, claimed `ago` seconds ago when given.
+fn add_box(
+    fake: &FakeAgent37,
+    (id, owner, state, status): (&str, &str, &str, &str),
+    ago: Option<u64>,
+) {
     let claimed = ago.map(|a| (now() - a).to_string());
     let mut meta = vec![
         ("crabbox_owner", owner),
@@ -119,7 +128,7 @@ fn add_lease(fake: &FakeAgent37, (id, owner, state): (&str, &str, &str), ago: Op
         id,
         &format!("crabbox-{owner}--{id}"),
         "vm",
-        "running",
+        status,
         &meta,
     );
 }
@@ -323,32 +332,103 @@ fn cleanup_keeps_the_newest_max_seeds_per_owner() {
 }
 
 #[test]
-fn cleanup_sweeps_a_lease_claimed_longer_ago_than_the_max_lease_age() {
+fn cleanup_never_sweeps_a_lease_by_age() {
     let fake = FakeAgent37::start_with_key(KEY);
-    let day = 86_400;
-    add_lease(&fake, ("stale", "me", "lease"), Some(2 * day));
-    add_lease(&fake, ("stuck", "me", "claiming"), Some(2 * day));
-    add_lease(&fake, ("recent", "me", "lease"), Some(3600));
-    add_lease(&fake, ("unstamped", "me", "lease"), None);
-    add_lease(&fake, ("theirs", "you", "lease"), Some(2 * day));
-    add_seed(&fake, ("seed", "k"), 3600);
+    add_lease(&fake, ("month-old", "me", "lease"), Some(30 * 86_400));
+    add_box(&fake, ("asleep", "me", "lease", "stopped"), Some(30 * 86_400));
     let (code, out) = operate(&fake, "cleanup", &json!({}));
     assert_eq!(code, 0, "{out}");
-    assert_eq!(
-        ids(&fake),
-        ["recent", "seed", "theirs", "unstamped"],
-        "{out}"
+    assert_eq!(ids(&fake), ["asleep", "month-old"], "{out}");
+}
+
+#[test]
+fn cleanup_sweeps_a_claim_left_over_an_hour() {
+    let fake = FakeAgent37::start_with_key(KEY);
+    add_lease(&fake, ("stuck", "me", "claiming"), Some(2 * 3600));
+    add_lease(&fake, ("fresh", "me", "claiming"), Some(600));
+    add_lease(&fake, ("unstamped", "me", "claiming"), None);
+    add_lease(&fake, ("theirs", "you", "claiming"), Some(2 * 3600));
+    let (code, out) = operate(&fake, "cleanup", &json!({}));
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(ids(&fake), ["fresh", "theirs", "unstamped"], "{out}");
+}
+
+#[test]
+fn a_long_ready_timeout_lengthens_the_claim_bound() {
+    let fake = FakeAgent37::start_with_key(KEY);
+    add_lease(&fake, ("slow", "me", "claiming"), Some(2 * 3600));
+    let config = config(&fake, &json!({ "readyTimeoutSeconds": 3 * 3600 }));
+    let (code, out) =
+        run(&json!({"protocolVersion": 1, "operation": "cleanup", "config": config}));
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(ids(&fake), ["slow"], "a claim may still be starting it: {out}");
+}
+
+#[test]
+fn cleanup_spares_a_stale_claim_given_back_after_it_listed() {
+    let fake = FakeAgent37::start_with_key(KEY);
+    add_lease(&fake, ("stale", "me", "claiming"), Some(2 * 3600));
+    fake.release_after_list("stale");
+    let (code, out) = operate(&fake, "cleanup", &json!({}));
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(ids(&fake), ["stale"], "it is a seed again: {out}");
+}
+
+/// Adds a stopped seed of `owner` as the previous release named and marked it: a lease name,
+/// `crabbox_role=seed`, no `crabbox_state`, and the lease id and slug its lease left behind.
+fn add_old_seed(fake: &FakeAgent37, (id, owner): (&str, &str)) {
+    let gen = (now() - 3600).to_string();
+    fake.add_instance_with_metadata(
+        id,
+        &format!("crabbox-{owner}--seed.{gen}"),
+        "vm",
+        "stopped",
+        &[
+            ("crabbox_owner", owner),
+            ("crabbox_role", "seed"),
+            ("crabbox_cache_key", "k"),
+            ("crabbox_seed_gen", &gen),
+            ("crabbox_seed_since", &gen),
+            ("crabbox_lease_id", id),
+            ("crabbox_slug", id),
+        ],
     );
 }
 
 #[test]
-fn cleanup_spares_a_stale_lease_released_after_it_listed() {
+fn old_format_seeds_stay_out_of_list_and_cleanup_deletes_only_this_owners() {
     let fake = FakeAgent37::start_with_key(KEY);
-    add_lease(&fake, ("stale", "me", "lease"), Some(2 * 86_400));
-    fake.release_after_list("stale");
+    add_old_seed(&fake, ("old", "me"));
+    add_old_seed(&fake, ("theirs", "you"));
+    add_lease(&fake, ("live", "me", "lease"), Some(60));
+    let (code, listed) = operate(&fake, "list", &json!({}));
+    assert_eq!(code, 0, "{listed}");
+    let names: Vec<&Value> = listed["leases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| &l["name"])
+        .collect();
+    assert_eq!(names, ["live"], "{listed}");
     let (code, out) = operate(&fake, "cleanup", &json!({}));
     assert_eq!(code, 0, "{out}");
-    assert_eq!(ids(&fake), ["stale"], "it is a fresh seed now: {out}");
+    assert_eq!(ids(&fake), ["live", "theirs"], "{out}");
+}
+
+#[test]
+fn list_hides_a_seed_by_its_state_whatever_its_name() {
+    let fake = FakeAgent37::start_with_key(KEY);
+    add_lease(&fake, ("kept", "me", "seed"), None);
+    add_lease(&fake, ("live", "me", "lease"), Some(60));
+    let (code, listed) = operate(&fake, "list", &json!({}));
+    assert_eq!(code, 0, "{listed}");
+    let names: Vec<&Value> = listed["leases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| &l["name"])
+        .collect();
+    assert_eq!(names, ["live"], "{listed}");
 }
 
 /// Asserts each listed seed names its scope, a generation and the disk the fake created it with.

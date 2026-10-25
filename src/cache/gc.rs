@@ -1,11 +1,13 @@
-//! The one sweep: surplus, expired and stuck seeds, and stranded leases.
+//! The one sweep: surplus, expired, stuck and old-format seeds, and stranded claims.
 
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 
 use serde_json::Value;
 
-use super::meta::{generation, now, seed_of, stopped_seed, stranded_lease, GEN, KEY, RELEASED_AT};
+use super::meta::{
+    generation, now, old_seed, seed_of, stopped_seed, stranded_claim, GEN, KEY, RELEASED_AT,
+};
 use super::seed::lock;
 use crate::agent37::{Agent37, Instance};
 use crate::lease::status_of;
@@ -16,12 +18,10 @@ const SEEDS_PER_KEY: u64 = 3;
 const TTL_DAYS: u64 = 7;
 /// Seeds kept per owner when the config sets no `cache.maxSeeds`.
 const MAX_SEEDS: u64 = 10;
-/// Hours a lease may go unwritten before it counts as stranded when the config sets no
-/// `cache.maxLeaseHours`. crabbox's lease TTL is 90 minutes, so a lease past a day is not
-/// one crabbox still means to keep.
-const MAX_LEASE_HOURS: u64 = 24;
-/// The shortest `cache.maxLeaseHours`: above crabbox's 90 minute lease TTL.
-const MIN_LEASE_HOURS: u64 = 2;
+/// Seconds a Box may stay `claiming` before it counts as stranded, unless twice
+/// `readyTimeoutSeconds` is longer. A claim holds that state from its `PATCH` until the started
+/// Box settles it, which the ready timeout bounds.
+const CLAIM_SECS: u64 = 3600;
 /// Seconds a seed may stay not stopped before it counts as stuck.
 const STUCK_SECS: u64 = 3600;
 
@@ -56,16 +56,16 @@ fn limit(config: &Value, field: &str, (default, min): (u64, u64)) -> Result<u64,
 #[derive(Debug, Default)]
 pub(crate) struct Sweep<'a> {
     /// Seeds beyond `cache.seedsPerKey` of their key or `cache.maxSeeds` of the owner, past
-    /// `cache.ttlDays`, or stuck not stopped.
+    /// `cache.ttlDays`, stuck not stopped, or in the previous release's format.
     pub(crate) seeds: Vec<&'a str>,
-    /// Leases the adapter last wrote over `cache.maxLeaseHours` ago.
-    pub(crate) leases: Vec<&'a str>,
-    /// Unix time before which a lease counts as stranded.
-    pub(crate) lease_cutoff: u64,
+    /// Boxes still `claiming` long after their claim wrote them.
+    pub(crate) claims: Vec<&'a str>,
+    /// Unix time before which a claim counts as stranded.
+    pub(crate) claim_cutoff: u64,
 }
 
 /// Deletes each of `ids` that a fresh read under the host claim lock still shows as a
-/// stopped seed of `owner`, or a stuck one; returns the ids deleted. A claim renames a seed
+/// stopped seed of `owner`, a stuck one or an old-format one; returns the ids deleted. A claim renames a seed
 /// before it starts it, so a Box being claimed is never deleted. Without the lock nothing is
 /// deleted.
 pub(crate) fn delete_seeds(api: &dyn Agent37, owner: &str, ids: &[String]) -> Vec<String> {
@@ -75,16 +75,20 @@ pub(crate) fn delete_seeds(api: &dyn Agent37, owner: &str, ids: &[String]) -> Ve
     ids.iter()
         .filter(|id| {
             api.get_instance(id)
-                .is_ok_and(|now| stopped_seed(&now, owner, None) || stuck_seed(&now, owner))
+                .is_ok_and(|now| {
+                    stopped_seed(&now, owner, None)
+                        || stuck_seed(&now, owner)
+                        || old_seed(&now, owner)
+                })
                 && api.delete_instance(id).is_ok()
         })
         .cloned()
         .collect()
 }
 
-/// Deletes each of `ids` that a fresh read still shows as a lease of `owner` last written
-/// before `cutoff`, so a lease released into a seed since the list is spared; returns the
-/// ids deleted.
+/// Deletes each of `ids` that a fresh read still shows as a claim of `owner` written before
+/// `cutoff`, so a claim given back to the seeds since the list is spared; returns the ids
+/// deleted.
 pub(crate) fn delete_stranded(
     api: &dyn Agent37,
     owner: &str,
@@ -94,7 +98,7 @@ pub(crate) fn delete_stranded(
     ids.iter()
         .filter(|id| {
             api.get_instance(id)
-                .is_ok_and(|now| stranded_lease(&now, owner, cutoff))
+                .is_ok_and(|now| stranded_claim(&now, owner, cutoff))
                 && api.delete_instance(id).is_ok()
         })
         .cloned()
@@ -103,7 +107,8 @@ pub(crate) fn delete_stranded(
 
 /// The sweep of `owner`'s instances, per `config.cache`: seeds beyond `seedsPerKey` of a key
 /// (3), older than `ttlDays` (7) or beyond `maxSeeds` of the owner (10), each oldest first,
-/// seeds stuck not stopped, and leases last written over `maxLeaseHours` (24) ago.
+/// seeds stuck not stopped, old-format seeds, and Boxes still `claiming` over [`CLAIM_SECS`]
+/// (or twice `readyTimeoutSeconds`) after their claim.
 pub(crate) fn gc<'a>(
     instances: &'a [Instance],
     owner: &str,
@@ -113,8 +118,7 @@ pub(crate) fn gc<'a>(
         usize::try_from(limit(config, "seedsPerKey", (SEEDS_PER_KEY, 1))?).unwrap_or(usize::MAX);
     let ttl = limit(config, "ttlDays", (TTL_DAYS, 0))?.saturating_mul(86_400);
     let max = usize::try_from(limit(config, "maxSeeds", (MAX_SEEDS, 0))?).unwrap_or(usize::MAX);
-    let lease_age =
-        limit(config, "maxLeaseHours", (MAX_LEASE_HOURS, MIN_LEASE_HOURS))?.saturating_mul(3600);
+    let claim_age = CLAIM_SECS.max(crate::lease::settings(config)?.timeout.saturating_mul(2));
     let mut seeds: Vec<&Instance> = instances
         .iter()
         .filter(|i| stopped_seed(i, owner, None))
@@ -139,7 +143,9 @@ pub(crate) fn gc<'a>(
         .copied()
         .collect();
     doomed.extend(kept.iter().skip(max).copied());
-    let stuck = instances.iter().filter(|i| stuck_seed(i, owner));
+    let stuck = instances
+        .iter()
+        .filter(|i| stuck_seed(i, owner) || old_seed(i, owner));
     let mut ids: Vec<&str> = doomed
         .into_iter()
         .chain(stuck)
@@ -147,15 +153,15 @@ pub(crate) fn gc<'a>(
         .collect();
     ids.sort_unstable();
     ids.dedup();
-    let lease_cutoff = now().saturating_sub(lease_age);
-    let leases = instances
+    let claim_cutoff = now().saturating_sub(claim_age);
+    let claims = instances
         .iter()
-        .filter(|i| stranded_lease(i, owner, lease_cutoff))
+        .filter(|i| stranded_claim(i, owner, claim_cutoff))
         .map(|i| i.id.as_str())
         .collect();
     Ok(Sweep {
         seeds: ids,
-        leases,
-        lease_cutoff,
+        claims,
+        claim_cutoff,
     })
 }
