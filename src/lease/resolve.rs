@@ -29,7 +29,7 @@ fn locate(
 ) -> Result<Instance, String> {
     let derived = desired.map(|d| format!("{}{}", prefix(owner), d.name));
     let Some(cloud_id) = expected.cloud_id.as_deref() else {
-        let name = derived.ok_or("resolve needs a cloud id or a desired lease")?;
+        let name = derived.ok_or("no cloud id or lease name to look up; lease not found")?;
         return find_by_name(api, &name, diag)?.ok_or_else(|| format!("instance {name} not found"));
     };
     let instance = api.get_instance(cloud_id).map_err(|e| match e {

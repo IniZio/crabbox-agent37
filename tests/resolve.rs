@@ -285,3 +285,30 @@ fn expected_lease_id_disagreeing_with_desired_is_rejected() {
     assert!(out.stdout.get("lease").is_none(), "{}", out.stdout);
     assert_sent_no_creates_or_deletes(&fake);
 }
+
+#[test]
+fn bare_id_without_cloud_id_or_desired_reports_not_found_without_api_calls() {
+    let fake = seeded();
+    let out = run(&resolve(&fake, None, &json!({})));
+    assert_eq!(out.code, 1, "{}", out.stdout);
+    assert!(out.text().ends_with("not found"), "{}", out.text());
+    assert!(seen(&fake).is_empty(), "{:?}", seen(&fake));
+}
+
+#[test]
+fn desired_without_cloud_id_and_no_such_instance_reports_not_found() {
+    let fake = FakeAgent37::start_with_key(KEY);
+    let out = run(&resolve(&fake, Some(&desired()), &json!({})));
+    assert_eq!(out.code, 1, "{}", out.stdout);
+    assert!(out.text().ends_with("not found"), "{}", out.text());
+    assert_sent_no_creates_or_deletes(&fake);
+}
+
+#[test]
+fn rejected_api_key_is_not_reported_as_not_found() {
+    let fake = FakeAgent37::start_with_key("sk_test_other");
+    fake.add_instance_with_status(ID, FULL_NAME, "vm", "running");
+    let out = run(&resolve(&fake, Some(&desired()), &json!({})));
+    assert_eq!(out.code, 1, "{}", out.stdout);
+    assert!(!out.text().contains("not found"), "{}", out.text());
+}
